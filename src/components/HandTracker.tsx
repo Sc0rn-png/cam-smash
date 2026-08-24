@@ -6,33 +6,60 @@ declare global {
   }
 }
 
+// Chargeur dynamique de script avec fallback CDN
+const loadMediaPipeHands = (): Promise<void> => {
+  return new Promise((resolve, reject) => {
+    if (window.Hands) return resolve();
+
+    const cdns = [
+      'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js',
+      'https://unpkg.com/@mediapipe/hands@0.4.1675469240/hands.js',
+    ];
+
+    let current = 0;
+
+    const tryLoad = () => {
+      if (current >= cdns.length) {
+        return reject(new Error("Tous les CDN MediaPipe ont échoué. Vérifie ta connexion."));
+      }
+
+      const script = document.createElement('script');
+      script.src = cdns[current];
+      script.crossOrigin = 'anonymous';
+
+      script.onload = () => resolve();
+      script.onerror = () => {
+        script.remove();
+        current++;
+        tryLoad();
+      };
+
+      document.head.appendChild(script);
+    };
+
+    tryLoad();
+  });
+};
+
 export default function HandTracker() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [status, setStatus] = useState<string>("Attente du chargement du CDN...");
+  const [status, setStatus] = useState<string>("Chargement du moteur d'IA...");
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
     let animFrameId: number;
     let stream: MediaStream | null = null;
 
-    const initCameraAndHands = async () => {
+    const init = async () => {
       try {
-        // 1. Attendre que le script CDN MediaPipe soit bien injecté
-        let attempts = 0;
-        while (!window.Hands && attempts < 50) {
-          await new Promise((r) => setTimeout(r, 100));
-          attempts++;
-        }
+        // 1. Chargement résilient des scripts MediaPipe
+        setStatus("Téléchargement de MediaPipe...");
+        await loadMediaPipeHands();
 
-        if (!window.Hands) {
-          setStatus("Erreur : Impossible de charger MediaPipe depuis le CDN.");
-          return;
-        }
-
-        setStatus("Initialisation du modèle d'IA...");
+        setStatus("Initialisation du modèle de suivi...");
         const hands = new window.Hands({
-          locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+          locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`,
         });
 
         hands.setOptions({
@@ -59,13 +86,13 @@ export default function HandTracker() {
                 const x = indexTip.x * canvasElement.width;
                 const y = indexTip.y * canvasElement.height;
 
-                // Halo lumineux
+                // Halo
                 canvasCtx.beginPath();
                 canvasCtx.arc(x, y, 22, 0, 2 * Math.PI);
                 canvasCtx.fillStyle = 'rgba(99, 102, 241, 0.4)';
                 canvasCtx.fill();
 
-                // Cible centrale
+                // Point central
                 canvasCtx.beginPath();
                 canvasCtx.arc(x, y, 10, 0, 2 * Math.PI);
                 canvasCtx.fillStyle = '#22c55e';
@@ -80,11 +107,11 @@ export default function HandTracker() {
           setIsLoaded(true);
         });
 
-        // 2. Demande native d'accès à la caméra (Mobile friendly)
-        setStatus("Autorisation caméra requise...");
+        // 2. Activation caméra native
+        setStatus("Demande d'accès caméra...");
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
-            facingMode: 'user', // Caméra frontale
+            facingMode: 'user',
             width: { ideal: 640 },
             height: { ideal: 480 },
           },
@@ -94,22 +121,21 @@ export default function HandTracker() {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
 
-          // 3. Boucle de rendu haute performance
-          const processFrame = async () => {
+          const process = async () => {
             if (videoRef.current && videoRef.current.readyState === 4) {
               await hands.send({ image: videoRef.current });
             }
-            animFrameId = requestAnimationFrame(processFrame);
+            animFrameId = requestAnimationFrame(process);
           };
-          processFrame();
+          process();
         }
       } catch (err: any) {
-        console.error("Erreur d'initialisation :", err);
-        setStatus(`Erreur : ${err.message || "Accès à la caméra refusé"}`);
+        console.error(err);
+        setStatus(`Erreur : ${err.message || "Accès caméra refusé"}`);
       }
     };
 
-    initCameraAndHands();
+    init();
 
     return () => {
       if (animFrameId) cancelAnimationFrame(animFrameId);
