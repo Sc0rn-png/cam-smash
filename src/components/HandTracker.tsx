@@ -1,12 +1,14 @@
 import { useRef, useState, useEffect } from 'react';
 import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 
-interface Target {
-  id: number;
+interface Point {
   x: number;
   y: number;
-  radius: number;
-  color: string;
+}
+
+interface SymbolDef {
+  name: string;
+  points: Point[]; // Points relatifs (0 à 1)
 }
 
 interface Particle {
@@ -19,36 +21,83 @@ interface Particle {
   life: number;
 }
 
+// Liste des symboles magiques à tracer
+const SYMBOLS: SymbolDef[] = [
+  {
+    name: 'Trait Céleste',
+    points: [
+      { x: 0.3, y: 0.4 },
+      { x: 0.7, y: 0.4 },
+    ],
+  },
+  {
+    name: 'Éclair Vulcain',
+    points: [
+      { x: 0.3, y: 0.3 },
+      { x: 0.7, y: 0.5 },
+      { x: 0.3, y: 0.5 },
+      { x: 0.7, y: 0.7 },
+    ],
+  },
+  {
+    name: 'Rune V',
+    points: [
+      { x: 0.3, y: 0.3 },
+      { x: 0.5, y: 0.6 },
+      { x: 0.7, y: 0.3 },
+    ],
+  },
+  {
+    name: 'Pic Glacial',
+    points: [
+      { x: 0.3, y: 0.6 },
+      { x: 0.5, y: 0.3 },
+      { x: 0.7, y: 0.6 },
+    ],
+  },
+];
+
+const MONSTERS = [
+  { name: 'Gobelin d’Ombre', hp: 30, color: '#22c55e', emoji: '👹' },
+  { name: 'Golem de Pierre', hp: 50, color: '#f59e0b', emoji: '🗿' },
+  { name: 'Démon Pourpre', hp: 70, color: '#ef4444', emoji: '👾' },
+  { name: 'Dragon d’Éther', hp: 100, color: '#a855f7', emoji: '🐉' },
+];
+
 export default function HandTracker() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const [gameState, setGameState] = useState<'idle' | 'loading' | 'playing' | 'gameover'>('idle');
-  const [score, setScore] = useState(0);
+  const [monstersKilled, setMonstersKilled] = useState(0);
   const [highScore, setHighScore] = useState(0);
   const [timeLeft, setTimeLeft] = useState(30);
   const [errorMsg, setErrorMsg] = useState('');
 
+  // États du monstre
+  const [monsterIndex, setMonsterIndex] = useState(0);
+  const [currentHp, setCurrentHp] = useState(30);
+
   const gameStateRef = useRef(gameState);
-  const scoreRef = useRef(0);
-  const targetsRef = useRef<Target[]>([]);
-  const particlesRef = useRef<Particle[]>([]);
   const landmarkerRef = useRef<HandLandmarker | null>(null);
   const animationFrameId = useRef<number | null>(null);
 
-  const lastFingerPositionsRef = useRef<{ x: number; y: number }[]>([]);
+  // Gestion du tracé
+  const currentSymbolRef = useRef<SymbolDef>(SYMBOLS[0]);
+  const activeCheckpointRef = useRef<number>(0);
+  const userTrailRef = useRef<Point[]>([]);
+  const particlesRef = useRef<Particle[]>([]);
   const lastAITimeRef = useRef<number>(0);
+  const fingerPosRef = useRef<Point | null>(null);
 
   const setGameStateSync = (state: 'idle' | 'loading' | 'playing' | 'gameover') => {
     gameStateRef.current = state;
     setGameState(state);
   };
 
-  const targetColors = ['#f43f5e', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
-
   useEffect(() => {
-    const savedHighScore = localStorage.getItem('index_smash_highscore');
-    if (savedHighScore) setHighScore(parseInt(savedHighScore, 10));
+    const saved = localStorage.getItem('wizard_high_score');
+    if (saved) setHighScore(parseInt(saved, 10));
 
     const handleResize = () => {
       if (canvasRef.current) {
@@ -56,12 +105,12 @@ export default function HandTracker() {
         canvasRef.current.height = window.innerHeight;
       }
     };
-
     handleResize();
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  // Chrono 30s
   useEffect(() => {
     let timer: NodeJS.Timeout;
     if (gameState === 'playing' && timeLeft > 0) {
@@ -69,10 +118,6 @@ export default function HandTracker() {
         setTimeLeft((prev) => {
           if (prev <= 1) {
             setGameStateSync('gameover');
-            if (scoreRef.current > highScore) {
-              setHighScore(scoreRef.current);
-              localStorage.setItem('index_smash_highscore', scoreRef.current.toString());
-            }
             return 0;
           }
           return prev - 1;
@@ -80,33 +125,32 @@ export default function HandTracker() {
       }, 1000);
     }
     return () => clearInterval(timer);
-  }, [gameState, timeLeft, highScore]);
+  }, [gameState, timeLeft]);
 
-  // Zone sécurisée au centre (20% marge X, 25% marge Y)
-  const spawnTarget = (width: number, height: number) => {
-    const paddingX = width * 0.20;
-    const paddingY = height * 0.25;
-
-    const newTarget: Target = {
-      id: Math.random(),
-      x: paddingX + Math.random() * (width - paddingX * 2),
-      y: paddingY + Math.random() * (height - paddingY * 2),
-      radius: Math.floor(Math.random() * 10) + 28,
-      color: targetColors[Math.floor(Math.random() * targetColors.length)],
-    };
-    targetsRef.current.push(newTarget);
+  const spawnNextMonster = (killedCount: number) => {
+    const mIdx = killedCount % MONSTERS.length;
+    setMonsterIndex(mIdx);
+    setCurrentHp(MONSTERS[mIdx].hp);
+    pickRandomSymbol();
   };
 
-  const createExplosion = (x: number, y: number, color: string) => {
-    for (let i = 0; i < 12; i++) {
+  const pickRandomSymbol = () => {
+    const nextSymbol = SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)];
+    currentSymbolRef.current = nextSymbol;
+    activeCheckpointRef.current = 0;
+    userTrailRef.current = [];
+  };
+
+  const createSpellExplosion = (x: number, y: number, color: string) => {
+    for (let i = 0; i < 25; i++) {
       const angle = Math.random() * Math.PI * 2;
-      const speed = Math.random() * 6 + 2;
+      const speed = Math.random() * 8 + 3;
       particlesRef.current.push({
         x,
         y,
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed,
-        radius: Math.random() * 4 + 2,
+        radius: Math.random() * 6 + 3,
         color,
         life: 1.0,
       });
@@ -123,19 +167,19 @@ export default function HandTracker() {
           'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
         );
 
+        // Activation GPU
         landmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
           baseOptions: {
             modelAssetPath:
               'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-            delegate: 'CPU',
+            delegate: 'GPU',
           },
           runningMode: 'VIDEO',
-          numHands: 2,
+          numHands: 1,
         });
       }
 
       if (!videoRef.current || !canvasRef.current) return;
-
       const video = videoRef.current;
 
       if (!video.srcObject) {
@@ -156,27 +200,13 @@ export default function HandTracker() {
   };
 
   const startGame = () => {
-    scoreRef.current = 0;
-    setScore(0);
+    setMonstersKilled(0);
     setTimeLeft(30);
-    targetsRef.current = [];
     particlesRef.current = [];
-
-    const canvas = canvasRef.current;
-    if (canvas) {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
-
-      for (let i = 0; i < 4; i++) {
-        spawnTarget(canvas.width, canvas.height);
-      }
-    }
-
+    spawnNextMonster(0);
     setGameStateSync('playing');
 
-    if (animationFrameId.current) {
-      cancelAnimationFrame(animationFrameId.current);
-    }
+    if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
     animationFrameId.current = requestAnimationFrame(renderLoop);
   };
 
@@ -186,10 +216,10 @@ export default function HandTracker() {
     const landmarker = landmarkerRef.current;
 
     if (!video || !canvas || !landmarker) return;
-
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    // Rendu flux caméra
     if (video.readyState >= 2) {
       ctx.save();
       ctx.translate(canvas.width, 0);
@@ -197,84 +227,123 @@ export default function HandTracker() {
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       ctx.restore();
 
-      // IA exécutée toutes les 35ms max pour ne pas ramer sur mobile
-      if (now - lastAITimeRef.current > 35) {
+      // Detection MediaPipe (30 FPS max pour économiser la batterie)
+      if (now - lastAITimeRef.current > 30) {
         lastAITimeRef.current = now;
         const results = landmarker.detectForVideo(video, now);
-        const currentPositions: { x: number; y: number }[] = [];
 
-        if (results.landmarks) {
-          for (const landmarks of results.landmarks) {
-            const indexTip = landmarks[8];
-            if (indexTip) {
-              const x = (1 - indexTip.x) * canvas.width;
-              const y = indexTip.y * canvas.height;
-              currentPositions.push({ x, y });
-            }
+        if (results.landmarks && results.landmarks[0]) {
+          const indexTip = results.landmarks[0][8];
+          if (indexTip) {
+            fingerPosRef.current = {
+              x: (1 - indexTip.x) * canvas.width,
+              y: indexTip.y * canvas.height,
+            };
           }
+        } else {
+          fingerPosRef.current = null;
         }
-        lastFingerPositionsRef.current = currentPositions;
       }
 
-      const fingerPositions = lastFingerPositionsRef.current;
-      for (const finger of fingerPositions) {
-        ctx.beginPath();
-        ctx.arc(finger.x, finger.y, 22, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(99, 102, 241, 0.5)';
-        ctx.fill();
+      const finger = fingerPosRef.current;
 
-        ctx.beginPath();
-        ctx.arc(finger.x, finger.y, 10, 0, Math.PI * 2);
-        ctx.fillStyle = '#22c55e';
-        ctx.fill();
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 3;
-        ctx.stroke();
-      }
-
+      // Traitement du jeu
       if (gameStateRef.current === 'playing') {
-        while (targetsRef.current.length < 4) {
-          spawnTarget(canvas.width, canvas.height);
-        }
+        const symbol = currentSymbolRef.current;
+        const targetPoint = symbol.points[activeCheckpointRef.current];
 
-        targetsRef.current = targetsRef.current.filter((target) => {
-          let hit = false;
+        if (targetPoint) {
+          const targetX = targetPoint.x * canvas.width;
+          const targetY = targetPoint.y * canvas.height;
 
-          for (const finger of fingerPositions) {
-            const dist = Math.hypot(finger.x - target.x, finger.y - target.y);
-            if (dist < target.radius + 20) {
-              hit = true;
-              break;
-            }
-          }
-
-          if (hit) {
-            createExplosion(target.x, target.y, target.color);
-            scoreRef.current += 10;
-            setScore(scoreRef.current);
-            return false;
-          }
-
+          // Dessin du symbole à tracer
           ctx.beginPath();
-          ctx.arc(target.x, target.y, target.radius, 0, Math.PI * 2);
-          ctx.fillStyle = target.color;
-          ctx.shadowColor = target.color;
-          ctx.shadowBlur = 10;
+          ctx.arc(targetX, targetY, 28, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(168, 85, 247, 0.3)';
           ctx.fill();
-          ctx.shadowBlur = 0;
-
-          ctx.strokeStyle = '#ffffff';
+          ctx.strokeStyle = '#c084fc';
           ctx.lineWidth = 3;
           ctx.stroke();
 
-          return true;
-        });
+          // Lignes entre checkpoints
+          ctx.beginPath();
+          symbol.points.forEach((pt, idx) => {
+            const px = pt.x * canvas.width;
+            const py = pt.y * canvas.height;
+            if (idx === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          });
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+          ctx.lineWidth = 6;
+          ctx.stroke();
 
+          // Validation de la position du doigt
+          if (finger) {
+            const dist = Math.hypot(finger.x - targetX, finger.y - targetY);
+
+            // Trait magique sous le doigt
+            userTrailRef.current.push({ x: finger.x, y: finger.y });
+            if (userTrailRef.current.length > 12) userTrailRef.current.shift();
+
+            if (dist < 45) {
+              activeCheckpointRef.current += 1;
+
+              // Sort réussi !
+              if (activeCheckpointRef.current >= symbol.points.length) {
+                createSpellExplosion(targetX, targetY, '#c084fc');
+
+                // Dégâts au monstre
+                setCurrentHp((prevHp) => {
+                  const newHp = prevHp - 25;
+                  if (newHp <= 0) {
+                    setMonstersKilled((k) => {
+                      const nextKilled = k + 1;
+                      if (nextKilled > highScore) {
+                        setHighScore(nextKilled);
+                        localStorage.setItem('wizard_high_score', nextKilled.toString());
+                      }
+                      spawnNextMonster(nextKilled);
+                      return nextKilled;
+                    });
+                  } else {
+                    pickRandomSymbol();
+                  }
+                  return newHp;
+                });
+              }
+            }
+          }
+        }
+
+        // Dessiner la traînée magique du doigt
+        if (userTrailRef.current.length > 1) {
+          ctx.beginPath();
+          ctx.moveTo(userTrailRef.current[0].x, userTrailRef.current[0].y);
+          for (let i = 1; i < userTrailRef.current.length; i++) {
+            ctx.lineTo(userTrailRef.current[i].x, userTrailRef.current[i].y);
+          }
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 8;
+          ctx.lineCap = 'round';
+          ctx.stroke();
+        }
+
+        // Dessiner la baguette (pointe de l'index)
+        if (finger) {
+          ctx.beginPath();
+          ctx.arc(finger.x, finger.y, 12, 0, Math.PI * 2);
+          ctx.fillStyle = '#38bdf8';
+          ctx.fill();
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 3;
+          ctx.stroke();
+        }
+
+        // Particules d'explosions
         particlesRef.current = particlesRef.current.filter((p) => {
           p.x += p.vx;
           p.y += p.vy;
-          p.life -= 0.06;
-
+          p.life -= 0.04;
           if (p.life <= 0) return false;
 
           ctx.beginPath();
@@ -283,7 +352,6 @@ export default function HandTracker() {
           ctx.globalAlpha = p.life;
           ctx.fill();
           ctx.globalAlpha = 1.0;
-
           return true;
         });
       }
@@ -292,56 +360,70 @@ export default function HandTracker() {
     animationFrameId.current = requestAnimationFrame(renderLoop);
   };
 
+  const currentMonster = MONSTERS[monsterIndex];
+
   return (
     <div className="fixed inset-0 w-screen h-screen bg-black overflow-hidden select-none">
       <video ref={videoRef} className="hidden" playsInline autoPlay muted />
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-cover" />
 
-      {/* HUD Haut */}
+      {/* HUD Supérieur */}
       <div className="absolute top-0 left-0 right-0 p-4 pt-6 flex justify-between items-center z-10 bg-gradient-to-b from-black/80 via-black/40 to-transparent pointer-events-none">
-        <div className="text-left">
-          <p className="text-[10px] text-slate-300 font-bold uppercase tracking-wider">Score</p>
-          <p className="text-3xl font-black text-indigo-400 drop-shadow-md">{score}</p>
+        <div>
+          <p className="text-[10px] text-slate-300 font-bold uppercase tracking-wider">Vaincus</p>
+          <p className="text-3xl font-black text-purple-400">{monstersKilled}</p>
         </div>
-
         <div className="text-center">
           <p className="text-[10px] text-slate-300 font-bold uppercase tracking-wider">Temps</p>
           <p
-            className={`text-3xl font-black drop-shadow-md ${
+            className={`text-3xl font-black ${
               timeLeft <= 5 ? 'text-red-500 animate-bounce' : 'text-amber-400'
             }`}
           >
             {timeLeft}s
           </p>
         </div>
-
         <div className="text-right">
           <p className="text-[10px] text-slate-300 font-bold uppercase tracking-wider">Record</p>
-          <p className="text-3xl font-black text-emerald-400 drop-shadow-md">{highScore}</p>
+          <p className="text-3xl font-black text-emerald-400">{highScore}</p>
         </div>
       </div>
 
-      {/* Logo discret bas */}
+      {/* Monstre en bas au centre */}
       {gameState === 'playing' && (
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
-          <span className="px-3 py-1 text-[11px] font-black uppercase tracking-widest text-white/80 bg-black/40 backdrop-blur-md rounded-full border border-white/10 shadow-lg">
-            INDEX SMASH 👆💥
-          </span>
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10 w-72 flex flex-col items-center pointer-events-none">
+          <div className="text-6xl mb-1 animate-bounce">{currentMonster.emoji}</div>
+          <div className="w-full bg-slate-900/80 backdrop-blur-md border border-white/20 p-3 rounded-2xl shadow-2xl text-center space-y-1.5">
+            <div className="flex justify-between items-center text-xs font-bold text-white">
+              <span>{currentMonster.name}</span>
+              <span>{Math.max(0, currentHp)} HP</span>
+            </div>
+            {/* Barre de vie */}
+            <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden border border-white/10">
+              <div
+                className="h-full transition-all duration-300 rounded-full"
+                style={{
+                  width: `${(Math.max(0, currentHp) / currentMonster.hp) * 100}%`,
+                  backgroundColor: currentMonster.color,
+                }}
+              />
+            </div>
+          </div>
         </div>
       )}
 
       {/* Écran d'accueil */}
       {gameState === 'idle' && (
         <div className="absolute inset-0 bg-slate-950/85 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20">
-          <h1 className="text-4xl font-black text-white mb-2">INDEX SMASH 👆💥</h1>
+          <h1 className="text-4xl font-black text-purple-400 mb-2">WIZARD DUEL 🧙‍♂️⚡</h1>
           <p className="text-sm text-slate-300 max-w-xs mb-6">
-            Pointe tes index vers l'écran pour éclater les cibles et battre le chrono.
+            Trace les runes magiques avec ton index pour terrassement les monstres avant la fin du temps !
           </p>
           <button
             onClick={startCameraAndGame}
-            className="px-8 py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-2xl shadow-xl shadow-indigo-500/30 transition-transform active:scale-95 text-lg"
+            className="px-8 py-4 bg-purple-600 hover:bg-purple-500 text-white font-bold rounded-2xl shadow-xl shadow-purple-500/30 transition-transform active:scale-95 text-lg"
           >
-            Jouer maintenant 🚀
+            Invoquer la magie 🪄
           </button>
         </div>
       )}
@@ -349,29 +431,24 @@ export default function HandTracker() {
       {/* Écran de chargement */}
       {gameState === 'loading' && (
         <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-20 space-y-4">
-          <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-sm font-semibold text-indigo-300">Préparation de la caméra et de l'IA...</p>
+          <div className="w-12 h-12 border-4 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-sm font-semibold text-purple-300">Chargement des grimoires et du GPU...</p>
         </div>
       )}
 
-      {/* Écran Game Over */}
+      {/* Fin de partie */}
       {gameState === 'gameover' && (
         <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20 space-y-4">
           <h2 className="text-3xl font-black text-red-500">TEMPS ÉCOULÉ ! ⏱️</h2>
           <div className="space-y-1">
-            <p className="text-slate-400 text-sm font-medium">Score final</p>
-            <p className="text-6xl font-black text-white">{score}</p>
+            <p className="text-slate-400 text-sm">Monstres vaincus</p>
+            <p className="text-6xl font-black text-white">{monstersKilled}</p>
           </div>
-          {score >= highScore && score > 0 && (
-            <p className="text-xs font-bold text-emerald-400 bg-emerald-500/20 px-4 py-1.5 rounded-full border border-emerald-500/30">
-              🎉 NOUVEAU RECORD !
-            </p>
-          )}
           <button
             onClick={startGame}
-            className="px-8 py-3.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl shadow-lg transition-transform active:scale-95 text-base mt-2"
+            className="px-8 py-3.5 bg-purple-600 hover:bg-purple-500 text-white font-bold rounded-xl shadow-lg transition-transform active:scale-95 text-base mt-2"
           >
-            Rejouer 🔄
+            Recommencer 🔄
           </button>
         </div>
       )}
