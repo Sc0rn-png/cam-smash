@@ -12,23 +12,20 @@ export default function HandTracker() {
     setErrorMsg('');
 
     try {
-      // Chargement du moteur WASM via le package officiel
       const vision = await FilesetResolver.forVisionTasks(
         'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
       );
 
-      // Initialisation de la détection sur processeur (compatibilité maximale)
+      // Chargement depuis le fichier local placé dans /public
       const handLandmarker = await HandLandmarker.createFromOptions(vision, {
         baseOptions: {
-          modelAssetPath:
-            'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+          modelAssetPath: '/hand_landmarker.task',
           delegate: 'CPU',
         },
         runningMode: 'VIDEO',
         numHands: 2,
       });
 
-      // Demande native d'accès caméra
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
         audio: false,
@@ -59,18 +56,16 @@ export default function HandTracker() {
 
             if (results.landmarks) {
               for (const landmarks of results.landmarks) {
-                const indexTip = landmarks[8]; // Bout de l'index
+                const indexTip = landmarks[8];
                 if (indexTip) {
                   const x = indexTip.x * canvas.width;
                   const y = indexTip.y * canvas.height;
 
-                  // Halo indigo
                   ctx.beginPath();
                   ctx.arc(x, y, 22, 0, 2 * Math.PI);
                   ctx.fillStyle = 'rgba(99, 102, 241, 0.4)';
                   ctx.fill();
 
-                  // Cible verte
                   ctx.beginPath();
                   ctx.arc(x, y, 10, 0, 2 * Math.PI);
                   ctx.fillStyle = '#22c55e';
@@ -91,7 +86,7 @@ export default function HandTracker() {
     } catch (err: any) {
       console.error(err);
       setStatus('error');
-      setErrorMsg(err?.message || "Impossible d'accéder à la caméra.");
+      setErrorMsg(err?.message || "Impossible de charger l'IA ou d'accéder à la caméra.");
     }
   };
 
