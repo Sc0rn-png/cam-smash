@@ -12,11 +12,10 @@ export default function HandTracker() {
     setErrorMsg('');
 
     try {
-      const vision = await FilesetResolver.forVisionTasks(
-        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
-      );
+      // 1. WASM en local (dossier public/wasm)
+      const vision = await FilesetResolver.forVisionTasks('/wasm');
 
-      // Chargement depuis le fichier local placé dans /public
+      // 2. Modèle en local (fichier public/hand_landmarker.task)
       const handLandmarker = await HandLandmarker.createFromOptions(vision, {
         baseOptions: {
           modelAssetPath: '/hand_landmarker.task',
@@ -86,7 +85,7 @@ export default function HandTracker() {
     } catch (err: any) {
       console.error(err);
       setStatus('error');
-      setErrorMsg(err?.message || "Impossible de charger l'IA ou d'accéder à la caméra.");
+      setErrorMsg(err?.message || "Erreur d'initialisation caméra/IA.");
     }
   };
 
@@ -104,7 +103,7 @@ export default function HandTracker() {
       {status === 'loading' && (
         <div className="flex flex-col items-center justify-center p-6 text-indigo-400 space-y-3 animate-pulse">
           <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-sm font-semibold">Chargement de l'IA...</p>
+          <p className="text-sm font-semibold">Chargement de l'IA (local)...</p>
         </div>
       )}
 
