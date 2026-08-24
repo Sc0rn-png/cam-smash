@@ -1,9 +1,9 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 
 export default function HandTracker() {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'active' | 'error'>('idle');
   const [errorMsg, setErrorMsg] = useState('');
 
@@ -12,13 +12,14 @@ export default function HandTracker() {
     setErrorMsg('');
 
     try {
-      // 1. WASM en local (dossier public/wasm)
-      const vision = await FilesetResolver.forVisionTasks('/wasm');
+      const vision = await FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+      );
 
-      // 2. Modèle en local (fichier public/hand_landmarker.task)
       const handLandmarker = await HandLandmarker.createFromOptions(vision, {
         baseOptions: {
-          modelAssetPath: '/hand_landmarker.task',
+          modelAssetPath:
+            'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
           delegate: 'CPU',
         },
         runningMode: 'VIDEO',
@@ -41,51 +42,49 @@ export default function HandTracker() {
 
       let lastVideoTime = -1;
       const render = () => {
-        if (video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+        if (video && canvas && ctx && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
           lastVideoTime = video.currentTime;
           canvas.width = video.videoWidth || 640;
           canvas.height = video.videoHeight || 480;
 
           const results = handLandmarker.detectForVideo(video, performance.now());
 
-          if (ctx) {
-            ctx.save();
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          ctx.save();
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-            if (results.landmarks) {
-              for (const landmarks of results.landmarks) {
-                const indexTip = landmarks[8];
-                if (indexTip) {
-                  const x = indexTip.x * canvas.width;
-                  const y = indexTip.y * canvas.height;
+          if (results.landmarks) {
+            for (const landmarks of results.landmarks) {
+              const indexTip = landmarks[8];
+              if (indexTip) {
+                const x = indexTip.x * canvas.width;
+                const y = indexTip.y * canvas.height;
 
-                  ctx.beginPath();
-                  ctx.arc(x, y, 22, 0, 2 * Math.PI);
-                  ctx.fillStyle = 'rgba(99, 102, 241, 0.4)';
-                  ctx.fill();
+                ctx.beginPath();
+                ctx.arc(x, y, 22, 0, 2 * Math.PI);
+                ctx.fillStyle = 'rgba(99, 102, 241, 0.4)';
+                ctx.fill();
 
-                  ctx.beginPath();
-                  ctx.arc(x, y, 10, 0, 2 * Math.PI);
-                  ctx.fillStyle = '#22c55e';
-                  ctx.fill();
-                  ctx.lineWidth = 3;
-                  ctx.strokeStyle = '#ffffff';
-                  ctx.stroke();
-                }
+                ctx.beginPath();
+                ctx.arc(x, y, 10, 0, 2 * Math.PI);
+                ctx.fillStyle = '#22c55e';
+                ctx.fill();
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = '#ffffff';
+                ctx.stroke();
               }
             }
-            ctx.restore();
           }
+          ctx.restore();
         }
         requestAnimationFrame(render);
       };
 
       render();
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(err);
       setStatus('error');
-      setErrorMsg(err?.message || "Erreur d'initialisation caméra/IA.");
+      setErrorMsg(err instanceof Error ? err.message : "Erreur d'accès caméra.");
     }
   };
 
@@ -103,7 +102,7 @@ export default function HandTracker() {
       {status === 'loading' && (
         <div className="flex flex-col items-center justify-center p-6 text-indigo-400 space-y-3 animate-pulse">
           <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-sm font-semibold">Chargement de l'IA (local)...</p>
+          <p className="text-sm font-semibold">Chargement de l'IA...</p>
         </div>
       )}
 
