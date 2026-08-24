@@ -1,136 +1,98 @@
 import { useEffect, useRef, useState } from 'react';
-
-declare global {
-  interface Window {
-    Hands: any;
-  }
-}
-
-// Chargeur dynamique de script avec fallback CDN
-const loadMediaPipeHands = (): Promise<void> => {
-  return new Promise((resolve, reject) => {
-    if (window.Hands) return resolve();
-
-    const cdns = [
-      'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js',
-      'https://unpkg.com/@mediapipe/hands@0.4.1675469240/hands.js',
-    ];
-
-    let current = 0;
-
-    const tryLoad = () => {
-      if (current >= cdns.length) {
-        return reject(new Error("Tous les CDN MediaPipe ont échoué. Vérifie ta connexion."));
-      }
-
-      const script = document.createElement('script');
-      script.src = cdns[current];
-      script.crossOrigin = 'anonymous';
-
-      script.onload = () => resolve();
-      script.onerror = () => {
-        script.remove();
-        current++;
-        tryLoad();
-      };
-
-      document.head.appendChild(script);
-    };
-
-    tryLoad();
-  });
-};
+import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 
 export default function HandTracker() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [status, setStatus] = useState<string>("Chargement du moteur d'IA...");
+  const [status, setStatus] = useState<string>("Chargement de l'IA...");
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
     let animFrameId: number;
     let stream: MediaStream | null = null;
+    let handLandmarker: HandLandmarker | null = null;
 
     const init = async () => {
       try {
-        // 1. Chargement résilient des scripts MediaPipe
-        setStatus("Téléchargement de MediaPipe...");
-        await loadMediaPipeHands();
+        setStatus("Chargement du modèle de détection...");
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+        );
 
-        setStatus("Initialisation du modèle de suivi...");
-        const hands = new window.Hands({
-          locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`,
+        handLandmarker = await HandLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+            delegate: "GPU"
+          },
+          runningMode: "VIDEO",
+          numHands: 2
         });
 
-        hands.setOptions({
-          maxNumHands: 2,
-          modelComplexity: 1,
-          minDetectionConfidence: 0.6,
-          minTrackingConfidence: 0.6,
-        });
-
-        hands.onResults((results: any) => {
-          const canvasElement = canvasRef.current;
-          if (!canvasElement) return;
-          const canvasCtx = canvasElement.getContext('2d');
-          if (!canvasCtx) return;
-
-          canvasCtx.save();
-          canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
-          canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
-
-          if (results.multiHandLandmarks) {
-            for (const landmarks of results.multiHandLandmarks) {
-              const indexTip = landmarks[8];
-              if (indexTip) {
-                const x = indexTip.x * canvasElement.width;
-                const y = indexTip.y * canvasElement.height;
-
-                // Halo
-                canvasCtx.beginPath();
-                canvasCtx.arc(x, y, 22, 0, 2 * Math.PI);
-                canvasCtx.fillStyle = 'rgba(99, 102, 241, 0.4)';
-                canvasCtx.fill();
-
-                // Point central
-                canvasCtx.beginPath();
-                canvasCtx.arc(x, y, 10, 0, 2 * Math.PI);
-                canvasCtx.fillStyle = '#22c55e';
-                canvasCtx.fill();
-                canvasCtx.lineWidth = 3;
-                canvasCtx.strokeStyle = '#ffffff';
-                canvasCtx.stroke();
-              }
-            }
-          }
-          canvasCtx.restore();
-          setIsLoaded(true);
-        });
-
-        // 2. Activation caméra native
         setStatus("Demande d'accès caméra...");
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: 'user',
             width: { ideal: 640 },
-            height: { ideal: 480 },
-          },
+            height: { ideal: 480 }
+          }
         });
 
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
 
-          const process = async () => {
-            if (videoRef.current && videoRef.current.readyState === 4) {
-              await hands.send({ image: videoRef.current });
+          let lastVideoTime = -1;
+          const process = () => {
+            if (videoRef.current && canvasRef.current && handLandmarker) {
+              const video = videoRef.current;
+              const canvas = canvasRef.current;
+              const ctx = canvas.getContext('2d');
+
+              if (video.currentTime !== lastVideoTime && video.readyState >= 2) {
+                lastVideoTime = video.currentTime;
+                const results = handLandmarker.detectForVideo(video, performance.now());
+
+                if (ctx) {
+                  ctx.save();
+                  ctx.clearRect(0, 0, canvas.width, canvas.height);
+                  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                  if (results.landmarks) {
+                    for (const landmarks of results.landmarks) {
+                      // Repère 8 = Bout de l'index
+                      const indexTip = landmarks[8];
+                      if (indexTip) {
+                        const x = indexTip.x * canvas.width;
+                        const y = indexTip.y * canvas.height;
+
+                        // Halo lumineux
+                        ctx.beginPath();
+                        ctx.arc(x, y, 22, 0, 2 * Math.PI);
+                        ctx.fillStyle = 'rgba(99, 102, 241, 0.4)';
+                        ctx.fill();
+
+                        // Point central vert
+                        ctx.beginPath();
+                        ctx.arc(x, y, 10, 0, 2 * Math.PI);
+                        ctx.fillStyle = '#22c55e';
+                        ctx.fill();
+                        ctx.lineWidth = 3;
+                        ctx.strokeStyle = '#ffffff';
+                        ctx.stroke();
+                      }
+                    }
+                  }
+                  ctx.restore();
+                }
+                setIsLoaded(true);
+              }
             }
             animFrameId = requestAnimationFrame(process);
           };
           process();
         }
       } catch (err: any) {
-        console.error(err);
+        console.error("Erreur HandLandmarker :", err);
         setStatus(`Erreur : ${err.message || "Accès caméra refusé"}`);
       }
     };
@@ -140,6 +102,7 @@ export default function HandTracker() {
     return () => {
       if (animFrameId) cancelAnimationFrame(animFrameId);
       if (stream) stream.getTracks().forEach((t) => t.stop());
+      if (handLandmarker) handLandmarker.close();
     };
   }, []);
 
