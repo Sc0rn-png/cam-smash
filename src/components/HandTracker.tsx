@@ -8,7 +8,7 @@ interface Point {
 
 interface SymbolDef {
   name: string;
-  points: Point[]; // Points relatifs à la Zone de Jeu (0.0 à 1.0)
+  points: Point[];
 }
 
 interface Particle {
@@ -21,12 +21,11 @@ interface Particle {
   life: number;
 }
 
-// Zone d'action restreinte (en pourcentage de l'écran)
 const PLAY_ZONE = {
-  xMin: 0.1,  // Marge gauche 10%
-  xMax: 0.9,  // Marge droite 90% (largeur 80%)
-  yMin: 0.22, // Marge haut 22% (sous le HUD)
-  yMax: 0.70, // Marge bas 70% (au-dessus du monstre)
+  xMin: 0.1,
+  xMax: 0.9,
+  yMin: 0.22,
+  yMax: 0.70,
 };
 
 const SYMBOLS: SymbolDef[] = [
@@ -88,6 +87,9 @@ export default function HandTracker() {
   const landmarkerRef = useRef<HandLandmarker | null>(null);
   const animationFrameId = useRef<number | null>(null);
 
+  // Verrou anti-mise en veille
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+
   const currentSymbolRef = useRef<SymbolDef>(SYMBOLS[0]);
   const activeCheckpointRef = useRef<number>(0);
   const userTrailRef = useRef<Point[]>([]);
@@ -115,6 +117,28 @@ export default function HandTracker() {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  // Réactivation du Wake Lock au retour sur l'onglet
+  useEffect(() => {
+    const handleVisibilityChange = async () => {
+      if (wakeLockRef.current !== null && document.visibilityState === 'visible') {
+        try {
+          wakeLockRef.current = await navigator.wakeLock.request('screen');
+        } catch (err) {
+          console.warn('Wake Lock réactivation échouée :', err);
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release();
+        wakeLockRef.current = null;
+      }
+    };
+  }, []);
+
   useEffect(() => {
     let timer: NodeJS.Timeout;
     if (gameState === 'playing' && timeLeft > 0) {
@@ -131,6 +155,29 @@ export default function HandTracker() {
     return () => clearInterval(timer);
   }, [gameState, timeLeft]);
 
+  // Passage plein écran & blocage de la mise en veille
+  const enableFullScreenAndWakeLock = async () => {
+    try {
+      if (!document.fullscreenElement) {
+        if (document.documentElement.requestFullscreen) {
+          await document.documentElement.requestFullscreen();
+        } else if ((document.documentElement as any).webkitRequestFullscreen) {
+          await (document.documentElement as any).webkitRequestFullscreen();
+        }
+      }
+    } catch (err) {
+      console.warn('Plein écran non supporté ou bloqué :', err);
+    }
+
+    try {
+      if ('wakeLock' in navigator) {
+        wakeLockRef.current = await navigator.wakeLock.request('screen');
+      }
+    } catch (err) {
+      console.warn('Anti-mise en veille non supporté :', err);
+    }
+  };
+
   const spawnNextMonster = (killedCount: number) => {
     const mIdx = killedCount % MONSTERS.length;
     setMonsterIndex(mIdx);
@@ -145,7 +192,6 @@ export default function HandTracker() {
     userTrailRef.current = [];
   };
 
-  // Convertit les coordonnées 0-1 de la zone vers l'écran en pixels
   const zoneToScreen = (pt: Point, width: number, height: number): Point => {
     const zoneW = (PLAY_ZONE.xMax - PLAY_ZONE.xMin) * width;
     const zoneH = (PLAY_ZONE.yMax - PLAY_ZONE.yMin) * height;
@@ -189,6 +235,8 @@ export default function HandTracker() {
   };
 
   const startCameraAndGame = async () => {
+    await enableFullScreenAndWakeLock();
+
     setGameStateSync('loading');
     setErrorMsg('');
 
@@ -256,7 +304,6 @@ export default function HandTracker() {
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       ctx.restore();
 
-      // Détection GPU
       if (now - lastAITimeRef.current > 30) {
         lastAITimeRef.current = now;
         const results = landmarker.detectForVideo(video, now);
@@ -267,7 +314,6 @@ export default function HandTracker() {
             const rawX = (1 - indexTip.x) * canvas.width;
             const rawY = indexTip.y * canvas.height;
 
-            // Filtrage : le doigt doit être à l'intérieur de la zone de jeu
             const zoneLeft = PLAY_ZONE.xMin * canvas.width;
             const zoneRight = PLAY_ZONE.xMax * canvas.width;
             const zoneTop = PLAY_ZONE.yMin * canvas.height;
@@ -276,7 +322,7 @@ export default function HandTracker() {
             if (rawX >= zoneLeft && rawX <= zoneRight && rawY >= zoneTop && rawY <= zoneBottom) {
               fingerPosRef.current = { x: rawX, y: rawY };
             } else {
-              fingerPosRef.current = null; // Hors zone
+              fingerPosRef.current = null;
             }
           }
         } else {
@@ -288,19 +334,8 @@ export default function HandTracker() {
 
       if (gameStateRef.current === 'playing') {
         const symbol = currentSymbolRef.current;
-        const zLeft = PLAY_ZONE.xMin * canvas.width;
-        const zTop = PLAY_ZONE.yMin * canvas.height;
-        const zW = (PLAY_ZONE.xMax - PLAY_ZONE.xMin) * canvas.width;
-        const zH = (PLAY_ZONE.yMax - PLAY_ZONE.yMin) * canvas.height;
 
-        // 1. Dessin de la Cadre Magique (Play Zone)
-        ctx.strokeStyle = 'rgba(192, 132, 252, 0.4)';
-        ctx.lineWidth = 2;
-        ctx.setLineDash([8, 6]);
-        ctx.strokeRect(zLeft, zTop, zW, zH);
-        ctx.setLineDash([]); // Reset dash
-
-        // 2. Lignes reliant les points du symbole
+        // Lignes reliant les points du symbole
         ctx.beginPath();
         symbol.points.forEach((pt, idx) => {
           const pos = zoneToScreen(pt, canvas.width, canvas.height);
@@ -311,7 +346,7 @@ export default function HandTracker() {
         ctx.lineWidth = 6;
         ctx.stroke();
 
-        // 3. Dessin des cercles numérotés
+        // Cercles numérotés
         symbol.points.forEach((pt, idx) => {
           const pos = zoneToScreen(pt, canvas.width, canvas.height);
           const isCurrent = idx === activeCheckpointRef.current;
@@ -337,7 +372,7 @@ export default function HandTracker() {
           ctx.fillText(String(idx + 1), pos.x, pos.y);
         });
 
-        // 4. Validation du tracé
+        // Validation du tracé
         const targetPt = symbol.points[activeCheckpointRef.current];
         if (targetPt && finger) {
           const targetPos = zoneToScreen(targetPt, canvas.width, canvas.height);
@@ -375,7 +410,7 @@ export default function HandTracker() {
           }
         }
 
-        // 5. Traînée lumineuse
+        // Traînée lumineuse
         if (userTrailRef.current.length > 1) {
           ctx.beginPath();
           ctx.moveTo(userTrailRef.current[0].x, userTrailRef.current[0].y);
@@ -388,7 +423,7 @@ export default function HandTracker() {
           ctx.stroke();
         }
 
-        // 6. Curseur baguette
+        // Curseur baguette
         if (finger) {
           ctx.beginPath();
           ctx.arc(finger.x, finger.y, 12, 0, Math.PI * 2);
@@ -399,7 +434,7 @@ export default function HandTracker() {
           ctx.stroke();
         }
 
-        // 7. Particules
+        // Particules
         particlesRef.current = particlesRef.current.filter((p) => {
           p.x += p.vx;
           p.y += p.vy;
@@ -450,7 +485,7 @@ export default function HandTracker() {
           </div>
         </div>
 
-        {/* Barre de vie du monstre */}
+        {/* Barre de vie */}
         {gameState === 'playing' && (
           <div className="w-full max-w-xs space-y-1 text-center">
             <div className="flex justify-between items-center text-xs font-bold text-white px-1">
@@ -472,7 +507,7 @@ export default function HandTracker() {
         )}
       </div>
 
-      {/* Monstre en bas */}
+      {/* Monstre */}
       {gameState === 'playing' && (
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 pointer-events-none text-center">
           <div className="text-9xl drop-shadow-2xl animate-pulse">{currentMonster.emoji}</div>
@@ -484,7 +519,7 @@ export default function HandTracker() {
         <div className="absolute inset-0 bg-slate-950/85 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20">
           <h1 className="text-4xl font-black text-purple-400 mb-2">WIZARD DUEL 🧙‍♂️⚡</h1>
           <p className="text-sm text-slate-300 max-w-xs mb-6">
-            Trace les runes dans le cadre magique avec ton index pour terrasser les monstres !
+            Trace les runes magiques avec ton index pour terrasser les monstres avant la fin du temps !
           </p>
           <button
             onClick={startCameraAndGame}
@@ -495,15 +530,15 @@ export default function HandTracker() {
         </div>
       )}
 
-      {/* Écran de chargement */}
+      {/* Chargement */}
       {gameState === 'loading' && (
         <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-20 space-y-4">
           <div className="w-12 h-12 border-4 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-sm font-semibold text-purple-300">Initialisation du cadre magique GPU...</p>
+          <p className="text-sm font-semibold text-purple-300">Préparation du rituel...</p>
         </div>
       )}
 
-      {/* Écran Game Over */}
+      {/* Game Over */}
       {gameState === 'gameover' && (
         <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20 space-y-4">
           <h2 className="text-3xl font-black text-red-500">TEMPS ÉCOULÉ ! ⏱️</h2>
@@ -520,7 +555,7 @@ export default function HandTracker() {
         </div>
       )}
 
-      {/* Message d'erreur */}
+      {/* Erreur */}
       {gameState === 'error' && (
         <div className="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center z-20 space-y-4">
           <p className="text-sm text-red-400 font-semibold">{errorMsg}</p>
