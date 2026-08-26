@@ -8,7 +8,7 @@ interface Point {
 
 interface SymbolDef {
   name: string;
-  points: Point[];
+  points: Point[]; // Points relatifs à la Zone de Jeu (0.0 à 1.0)
 }
 
 interface Particle {
@@ -21,37 +21,45 @@ interface Particle {
   life: number;
 }
 
+// Zone d'action restreinte (en pourcentage de l'écran)
+const PLAY_ZONE = {
+  xMin: 0.1,  // Marge gauche 10%
+  xMax: 0.9,  // Marge droite 90% (largeur 80%)
+  yMin: 0.22, // Marge haut 22% (sous le HUD)
+  yMax: 0.70, // Marge bas 70% (au-dessus du monstre)
+};
+
 const SYMBOLS: SymbolDef[] = [
   {
     name: 'Trait Céleste',
     points: [
-      { x: 0.3, y: 0.4 },
-      { x: 0.7, y: 0.4 },
+      { x: 0.2, y: 0.5 },
+      { x: 0.8, y: 0.5 },
     ],
   },
   {
     name: 'Éclair Vulcain',
     points: [
-      { x: 0.3, y: 0.3 },
-      { x: 0.7, y: 0.5 },
-      { x: 0.3, y: 0.5 },
-      { x: 0.7, y: 0.7 },
+      { x: 0.2, y: 0.2 },
+      { x: 0.8, y: 0.5 },
+      { x: 0.2, y: 0.5 },
+      { x: 0.8, y: 0.8 },
     ],
   },
   {
     name: 'Rune V',
     points: [
-      { x: 0.3, y: 0.3 },
-      { x: 0.5, y: 0.6 },
-      { x: 0.7, y: 0.3 },
+      { x: 0.2, y: 0.2 },
+      { x: 0.5, y: 0.8 },
+      { x: 0.8, y: 0.2 },
     ],
   },
   {
     name: 'Pic Glacial',
     points: [
-      { x: 0.3, y: 0.6 },
-      { x: 0.5, y: 0.3 },
-      { x: 0.7, y: 0.6 },
+      { x: 0.2, y: 0.8 },
+      { x: 0.5, y: 0.2 },
+      { x: 0.8, y: 0.8 },
     ],
   },
 ];
@@ -135,6 +143,19 @@ export default function HandTracker() {
     currentSymbolRef.current = nextSymbol;
     activeCheckpointRef.current = 0;
     userTrailRef.current = [];
+  };
+
+  // Convertit les coordonnées 0-1 de la zone vers l'écran en pixels
+  const zoneToScreen = (pt: Point, width: number, height: number): Point => {
+    const zoneW = (PLAY_ZONE.xMax - PLAY_ZONE.xMin) * width;
+    const zoneH = (PLAY_ZONE.yMax - PLAY_ZONE.yMin) * height;
+    const startX = PLAY_ZONE.xMin * width;
+    const startY = PLAY_ZONE.yMin * height;
+
+    return {
+      x: startX + pt.x * zoneW,
+      y: startY + pt.y * zoneH,
+    };
   };
 
   const createSpellExplosion = (x: number, y: number, color: string) => {
@@ -235,6 +256,7 @@ export default function HandTracker() {
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       ctx.restore();
 
+      // Détection GPU
       if (now - lastAITimeRef.current > 30) {
         lastAITimeRef.current = now;
         const results = landmarker.detectForVideo(video, now);
@@ -242,10 +264,20 @@ export default function HandTracker() {
         if (results.landmarks && results.landmarks[0]) {
           const indexTip = results.landmarks[0][8];
           if (indexTip) {
-            fingerPosRef.current = {
-              x: (1 - indexTip.x) * canvas.width,
-              y: indexTip.y * canvas.height,
-            };
+            const rawX = (1 - indexTip.x) * canvas.width;
+            const rawY = indexTip.y * canvas.height;
+
+            // Filtrage : le doigt doit être à l'intérieur de la zone de jeu
+            const zoneLeft = PLAY_ZONE.xMin * canvas.width;
+            const zoneRight = PLAY_ZONE.xMax * canvas.width;
+            const zoneTop = PLAY_ZONE.yMin * canvas.height;
+            const zoneBottom = PLAY_ZONE.yMax * canvas.height;
+
+            if (rawX >= zoneLeft && rawX <= zoneRight && rawY >= zoneTop && rawY <= zoneBottom) {
+              fingerPosRef.current = { x: rawX, y: rawY };
+            } else {
+              fingerPosRef.current = null; // Hors zone
+            }
           }
         } else {
           fingerPosRef.current = null;
@@ -256,65 +288,71 @@ export default function HandTracker() {
 
       if (gameStateRef.current === 'playing') {
         const symbol = currentSymbolRef.current;
+        const zLeft = PLAY_ZONE.xMin * canvas.width;
+        const zTop = PLAY_ZONE.yMin * canvas.height;
+        const zW = (PLAY_ZONE.xMax - PLAY_ZONE.xMin) * canvas.width;
+        const zH = (PLAY_ZONE.yMax - PLAY_ZONE.yMin) * canvas.height;
 
-        // Lignes reliant tous les points du symbole
+        // 1. Dessin de la Cadre Magique (Play Zone)
+        ctx.strokeStyle = 'rgba(192, 132, 252, 0.4)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([8, 6]);
+        ctx.strokeRect(zLeft, zTop, zW, zH);
+        ctx.setLineDash([]); // Reset dash
+
+        // 2. Lignes reliant les points du symbole
         ctx.beginPath();
         symbol.points.forEach((pt, idx) => {
-          const px = pt.x * canvas.width;
-          const py = pt.y * canvas.height;
-          if (idx === 0) ctx.moveTo(px, py);
-          else ctx.lineTo(px, py);
+          const pos = zoneToScreen(pt, canvas.width, canvas.height);
+          if (idx === 0) ctx.moveTo(pos.x, pos.y);
+          else ctx.lineTo(pos.x, pos.y);
         });
         ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
         ctx.lineWidth = 6;
         ctx.stroke();
 
-        // Dessin des cercles numérotés
+        // 3. Dessin des cercles numérotés
         symbol.points.forEach((pt, idx) => {
-          const px = pt.x * canvas.width;
-          const py = pt.y * canvas.height;
+          const pos = zoneToScreen(pt, canvas.width, canvas.height);
           const isCurrent = idx === activeCheckpointRef.current;
           const isPassed = idx < activeCheckpointRef.current;
 
           ctx.beginPath();
-          ctx.arc(px, py, isCurrent ? 30 : 22, 0, Math.PI * 2);
+          ctx.arc(pos.x, pos.y, isCurrent ? 28 : 20, 0, Math.PI * 2);
           ctx.fillStyle = isPassed
-            ? 'rgba(34, 197, 94, 0.5)'
+            ? 'rgba(34, 197, 94, 0.6)'
             : isCurrent
-            ? 'rgba(168, 85, 247, 0.6)'
-            : 'rgba(15, 23, 42, 0.7)';
+            ? 'rgba(168, 85, 247, 0.7)'
+            : 'rgba(15, 23, 42, 0.8)';
           ctx.fill();
 
           ctx.strokeStyle = isPassed ? '#22c55e' : isCurrent ? '#c084fc' : '#ffffff';
           ctx.lineWidth = isCurrent ? 4 : 2;
           ctx.stroke();
 
-          // Chiffre d'ordre au centre
           ctx.fillStyle = '#ffffff';
-          ctx.font = `bold ${isCurrent ? 22 : 16}px sans-serif`;
+          ctx.font = `bold ${isCurrent ? 20 : 15}px sans-serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillText(String(idx + 1), px, py);
+          ctx.fillText(String(idx + 1), pos.x, pos.y);
         });
 
-        // Validation du tracé
-        const targetPoint = symbol.points[activeCheckpointRef.current];
-        if (targetPoint && finger) {
-          const targetX = targetPoint.x * canvas.width;
-          const targetY = targetPoint.y * canvas.height;
-          const dist = Math.hypot(finger.x - targetX, finger.y - targetY);
+        // 4. Validation du tracé
+        const targetPt = symbol.points[activeCheckpointRef.current];
+        if (targetPt && finger) {
+          const targetPos = zoneToScreen(targetPt, canvas.width, canvas.height);
+          const dist = Math.hypot(finger.x - targetPos.x, finger.y - targetPos.y);
 
           userTrailRef.current.push({ x: finger.x, y: finger.y });
           if (userTrailRef.current.length > 14) userTrailRef.current.shift();
 
-          // Génération d'étincelles sous le doigt
           spawnSparks(finger.x, finger.y);
 
-          if (dist < 48) {
+          if (dist < 45) {
             activeCheckpointRef.current += 1;
 
             if (activeCheckpointRef.current >= symbol.points.length) {
-              createSpellExplosion(targetX, targetY, '#c084fc');
+              createSpellExplosion(targetPos.x, targetPos.y, '#c084fc');
 
               setCurrentHp((prevHp) => {
                 const newHp = prevHp - 25;
@@ -337,7 +375,7 @@ export default function HandTracker() {
           }
         }
 
-        // Traînée lumineuse
+        // 5. Traînée lumineuse
         if (userTrailRef.current.length > 1) {
           ctx.beginPath();
           ctx.moveTo(userTrailRef.current[0].x, userTrailRef.current[0].y);
@@ -350,7 +388,7 @@ export default function HandTracker() {
           ctx.stroke();
         }
 
-        // Curseur baguette
+        // 6. Curseur baguette
         if (finger) {
           ctx.beginPath();
           ctx.arc(finger.x, finger.y, 12, 0, Math.PI * 2);
@@ -361,7 +399,7 @@ export default function HandTracker() {
           ctx.stroke();
         }
 
-        // Mise à jour des particules (explosions et étincelles)
+        // 7. Particules
         particlesRef.current = particlesRef.current.filter((p) => {
           p.x += p.vx;
           p.y += p.vy;
@@ -389,7 +427,7 @@ export default function HandTracker() {
       <video ref={videoRef} className="hidden" playsInline autoPlay muted />
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-cover" />
 
-      {/* HUD Supérieur avec Barre de Vie intégrée */}
+      {/* HUD Supérieur */}
       <div className="absolute top-0 left-0 right-0 p-4 pt-6 flex flex-col items-center z-10 bg-gradient-to-b from-black/90 via-black/50 to-transparent pointer-events-none space-y-3">
         <div className="flex justify-between items-center w-full max-w-md">
           <div className="text-left">
@@ -412,7 +450,7 @@ export default function HandTracker() {
           </div>
         </div>
 
-        {/* Barre de vie du monstre sous le HUD */}
+        {/* Barre de vie du monstre */}
         {gameState === 'playing' && (
           <div className="w-full max-w-xs space-y-1 text-center">
             <div className="flex justify-between items-center text-xs font-bold text-white px-1">
@@ -434,7 +472,7 @@ export default function HandTracker() {
         )}
       </div>
 
-      {/* Monstre agrandi en bas */}
+      {/* Monstre en bas */}
       {gameState === 'playing' && (
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 pointer-events-none text-center">
           <div className="text-9xl drop-shadow-2xl animate-pulse">{currentMonster.emoji}</div>
@@ -446,7 +484,7 @@ export default function HandTracker() {
         <div className="absolute inset-0 bg-slate-950/85 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20">
           <h1 className="text-4xl font-black text-purple-400 mb-2">WIZARD DUEL 🧙‍♂️⚡</h1>
           <p className="text-sm text-slate-300 max-w-xs mb-6">
-            Trace les runes numérotées avec ton index pour terrasser les monstres avant la fin du temps !
+            Trace les runes dans le cadre magique avec ton index pour terrasser les monstres !
           </p>
           <button
             onClick={startCameraAndGame}
@@ -461,7 +499,7 @@ export default function HandTracker() {
       {gameState === 'loading' && (
         <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-20 space-y-4">
           <div className="w-12 h-12 border-4 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-sm font-semibold text-purple-300">Chargement des grimoires et du GPU...</p>
+          <p className="text-sm font-semibold text-purple-300">Initialisation du cadre magique GPU...</p>
         </div>
       )}
 
