@@ -1,15 +1,15 @@
-import { useRef, useState, useEffect } from 'react';
-import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
+import React, { useEffect, useRef, useState } from 'react';
+import { Heart, Maximize2, Play, RotateCcw, ShieldAlert } from 'lucide-react';
 
 interface Point {
   x: number;
   y: number;
 }
 
-interface TrailPoint {
+interface Mine {
   x: number;
   y: number;
-  time: number;
+  radius: number;
 }
 
 interface Particle {
@@ -22,625 +22,518 @@ interface Particle {
   alpha: number;
 }
 
-const PLAY_ZONE = {
-  xMin: 0.1,
-  xMax: 0.9,
-  yMin: 0.22,
-  yMax: 0.70,
-};
-
-function generatePattern(numPoints: number): Point[] {
-  const points: Point[] = [];
-  const minDist = 0.3;
-  let attempts = 0;
-
-  while (points.length < numPoints && attempts < 250) {
-    attempts++;
-    const candidate: Point = {
-      x: Number((0.15 + Math.random() * 0.7).toFixed(2)),
-      y: Number((0.15 + Math.random() * 0.7).toFixed(2)),
-    };
-
-    const isFarEnough = points.every((p) => {
-      const dx = p.x - candidate.x;
-      const dy = p.y - candidate.y;
-      return Math.hypot(dx, dy) >= minDist;
-    });
-
-    if (isFarEnough) points.push(candidate);
-  }
-
-  if (points.length < numPoints) {
-    const grid = [
-      { x: 0.2, y: 0.2 },
-      { x: 0.8, y: 0.2 },
-      { x: 0.5, y: 0.5 },
-      { x: 0.2, y: 0.8 },
-      { x: 0.8, y: 0.8 },
-    ];
-    return grid.slice(0, numPoints);
-  }
-
-  return points;
-}
-
-export default function HandTracker() {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-
-  const [gameState, setGameState] = useState<'idle' | 'loading' | 'playing' | 'gameover'>('idle');
-  const [showTutorial, setShowTutorial] = useState(false);
-  const [score, setScore] = useState(0);
-  const [highScore, setHighScore] = useState(0);
-  const [timeLeft, setTimeLeft] = useState(60);
-  const [errorMsg, setErrorMsg] = useState('');
+export const HandTracker: React.FC = () => {
+  // États de jeu
+  const [gameState, setGameState] = useState<'START' | 'PLAYING' | 'GAMEOVER'>('START');
+  const [timeLeft, setTimeLeft] = useState<number>(45);
+  const [lives, setLives] = useState<number>(3);
+  const [score, setScore] = useState<number>(0);
+  const [highScore, setHighScore] = useState<number>(0);
+  const [shapesCount, setShapesCount] = useState<number>(0);
   const [bonusNotification, setBonusNotification] = useState<string | null>(null);
+  const [isFlashing, setIsFlashing] = useState<boolean>(false);
+  const [damagedHeartIndex, setDamagedHeartIndex] = useState<number | null>(null);
 
-  const gameStateRef = useRef(gameState);
-  const landmarkerRef = useRef<HandLandmarker | null>(null);
-  const animationFrameId = useRef<number | null>(null);
-  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
-
-  const currentPatternRef = useRef<Point[]>([]);
-  const activeCheckpointRef = useRef<number>(0);
-  const trailRef = useRef<TrailPoint[]>([]);
+  // Refs
+  const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const trailRef = useRef<Point[]>([]);
   const particlesRef = useRef<Particle[]>([]);
-  const lastAITimeRef = useRef<number>(0);
-  const fingerPosRef = useRef<Point | null>(null);
+  const minesRef = useRef<Mine[]>([]);
+  const patternRef = useRef<Point[]>([]);
+  const activeCheckpointRef = useRef<number>(0);
+  const shapesCompletedRef = useRef<number>(0);
+  const simulatedFingerRef = useRef<Point | null>(null);
+  const animFrameRef = useRef<number | null>(null);
 
-  const setGameStateSync = (state: 'idle' | 'loading' | 'playing' | 'gameover') => {
-    gameStateRef.current = state;
-    setGameState(state);
-  };
-
-  const getLevelInfo = (currentScore: number) => {
-    if (currentScore >= 400) {
-      return { level: 3, numPoints: 5, timeBonus: 6, name: 'OVERDRIVE', color: '#ec4899', ptsPerShape: 25 };
-    }
-    if (currentScore >= 200) {
-      return { level: 2, numPoints: 4, timeBonus: 8, name: 'EXPERT', color: '#f59e0b', ptsPerShape: 15 };
-    }
-    return { level: 1, numPoints: 3, timeBonus: 10, name: 'NOVICE', color: '#06b6d4', ptsPerShape: 10 };
-  };
-
+  // Chargement du meilleur score
   useEffect(() => {
-    const savedScore = localStorage.getItem('hyper_tracer_high_score');
-    if (savedScore) setHighScore(parseInt(savedScore, 10));
+    const saved = localStorage.getItem('hyper_tracer_high_score');
+    if (saved) setHighScore(parseInt(saved, 10));
+  }, []);
 
-    const tutoSeen = localStorage.getItem('hyper_tracer_tuto_seen');
-    if (!tutoSeen) setShowTutorial(true);
+  // --- 1. FONCTION DE PLEIN ÉCRAN SÉCURISÉE ---
+  const toggleFullscreen = () => {
+    try {
+      if (!document.fullscreenElement) {
+        if (containerRef.current?.requestFullscreen) {
+          containerRef.current.requestFullscreen().catch((err) => {
+            console.warn("Plein écran non disponible ou refusé par le navigateur:", err);
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("Erreur Fullscreen API:", e);
+    }
+  };
 
+  // --- 2. GESTION DU TEMPS ---
+  useEffect(() => {
+    if (gameState !== 'PLAYING') return;
+
+    const timer = setInterval(() => {
+      setTimeLeft((prev) => {
+        if (prev <= 1) {
+          setGameState('GAMEOVER');
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [gameState]);
+
+  // --- 3. GÉNÉRATION DES MOTIFS & MINES ---
+  const generatePattern = (width: number, height: number): Point[] => {
+    const points: Point[] = [];
+    const count = 4 + Math.floor(Math.random() * 2);
+    const margin = 120;
+
+    for (let i = 0; i < count; i++) {
+      points.push({
+        x: margin + Math.random() * (width - margin * 2),
+        y: margin + Math.random() * (height - margin * 2),
+      });
+    }
+    return points;
+  };
+
+  const spawnMines = (width: number, height: number, patternPoints: Point[]) => {
+    const newMines: Mine[] = [];
+    const numMines = Math.floor(Math.random() * 2) + 1; // 1 ou 2 mines par forme
+
+    for (let i = 0; i < numMines; i++) {
+      let x = 0, y = 0, safe = false;
+      let attempts = 0;
+
+      while (!safe && attempts < 20) {
+        x = 100 + Math.random() * (width - 200);
+        y = 100 + Math.random() * (height - 200);
+        attempts++;
+
+        // Vérifier qu'elle n'est pas trop proche des cibles
+        safe = patternPoints.every(pt => Math.hypot(pt.x - x, pt.y - y) > 90);
+      }
+
+      newMines.push({ x, y, radius: 20 });
+    }
+    minesRef.current = newMines;
+  };
+
+  const spawnNewShape = () => {
+    if (!canvasRef.current) return;
+    const w = canvasRef.current.width;
+    const h = canvasRef.current.height;
+
+    patternRef.current = generatePattern(w, h);
+    activeCheckpointRef.current = 0;
+    spawnMines(w, h, patternRef.current);
+  };
+
+  // --- 4. DÉMARRAGE DU JEU ---
+  const startGame = () => {
+    setTimeLeft(45);
+    setLives(3);
+    setScore(0);
+    setShapesCount(0);
+    shapesCompletedRef.current = 0;
+    trailRef.current = [];
+    particlesRef.current = [];
+
+    if (canvasRef.current) {
+      canvasRef.current.width = window.innerWidth;
+      canvasRef.current.height = window.innerHeight;
+      spawnNewShape();
+    }
+
+    setGameState('PLAYING');
+  };
+
+  // --- 5. EFFETS ET PARTICULES ---
+  const triggerExplosion = (x: number, y: number) => {
+    for (let i = 0; i < 20; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = Math.random() * 6 + 2;
+      particlesRef.current.push({
+        x,
+        y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        size: Math.random() * 5 + 2,
+        color: '#fef08a',
+        alpha: 1.0,
+      });
+    }
+  };
+
+  // --- 6. DESSIN DE LA MINE ---
+  const drawMine = (ctx: CanvasRenderingContext2D, mine: Mine) => {
+    ctx.save();
+    ctx.translate(mine.x, mine.y);
+
+    // Piques rouges
+    const spikes = 8;
+    ctx.fillStyle = '#ef4444';
+    for (let i = 0; i < spikes; i++) {
+      const angle = (i * Math.PI * 2) / spikes;
+      ctx.save();
+      ctx.rotate(angle);
+      ctx.beginPath();
+      ctx.moveTo(0, -mine.radius - 8);
+      ctx.lineTo(-6, -mine.radius + 2);
+      ctx.lineTo(6, -mine.radius + 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Corps central (Noir)
+    ctx.beginPath();
+    ctx.arc(0, 0, mine.radius, 0, Math.PI * 2);
+    ctx.fillStyle = '#09090b';
+    ctx.fill();
+    ctx.strokeStyle = '#ef4444';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    // Cœur clignotant
+    ctx.beginPath();
+    ctx.arc(0, 0, 5, 0, Math.PI * 2);
+    ctx.fillStyle = '#f87171';
+    ctx.fill();
+
+    ctx.restore();
+  };
+
+  // --- 7. BOUCLE DE RENDU PRINCIPALE ---
+  useEffect(() => {
     const handleResize = () => {
       if (canvasRef.current) {
         canvasRef.current.width = window.innerWidth;
         canvasRef.current.height = window.innerHeight;
       }
     };
-    handleResize();
     window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, []);
+    handleResize();
 
-  useEffect(() => {
-    let timer: NodeJS.Timeout;
-    if (gameState === 'playing' && timeLeft > 0) {
-      timer = setInterval(() => {
-        setTimeLeft((prev) => {
-          if (prev <= 1) {
-            setGameStateSync('gameover');
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    }
-    return () => clearInterval(timer);
-  }, [gameState, timeLeft]);
-
-  const closeTutorial = () => {
-    localStorage.setItem('hyper_tracer_tuto_seen', 'true');
-    setShowTutorial(false);
-  };
-
-  const enableFullScreenAndWakeLock = async () => {
-    try {
-      if (!document.fullscreenElement) {
-        await document.documentElement.requestFullscreen().catch(() => {});
-      }
-      if ('wakeLock' in navigator) {
-        wakeLockRef.current = await navigator.wakeLock.request('screen');
-      }
-    } catch (err) {
-      console.warn('Screen setup warn:', err);
-    }
-  };
-
-  const zoneToScreen = (pt: Point, width: number, height: number): Point => {
-    const zoneW = (PLAY_ZONE.xMax - PLAY_ZONE.xMin) * width;
-    const zoneH = (PLAY_ZONE.yMax - PLAY_ZONE.yMin) * height;
-    const startX = PLAY_ZONE.xMin * width;
-    const startY = PLAY_ZONE.yMin * height;
-    return {
-      x: startX + pt.x * zoneW,
-      y: startY + pt.y * zoneH,
+    // Simulation de la souris/touch pour tester le doigt
+    const handlePointerMove = (e: PointerEvent) => {
+      simulatedFingerRef.current = { x: e.clientX, y: e.clientY };
     };
-  };
+    window.addEventListener('pointermove', handlePointerMove);
 
-  const triggerExplosion = (x: number, y: number) => {
-    const colors = ['#ffffff', '#fef08a', '#f97316', '#ef4444'];
-    for (let i = 0; i < 20; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const speed = Math.random() * 9 + 3;
-      particlesRef.current.push({
-        x,
-        y,
-        vx: Math.cos(angle) * speed,
-        vy: Math.sin(angle) * speed,
-        size: Math.random() * 6 + 3,
-        color: colors[Math.floor(Math.random() * colors.length)],
-        alpha: 1.0,
-      });
-    }
-  };
+    const render = () => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
 
-  const spawnNewPattern = (numPoints: number) => {
-    currentPatternRef.current = generatePattern(numPoints);
-    activeCheckpointRef.current = 0;
-  };
-
-  const startCameraAndGame = async () => {
-    if (showTutorial) closeTutorial();
-    await enableFullScreenAndWakeLock();
-    setGameStateSync('loading');
-    setErrorMsg('');
-
-    try {
-      if (!landmarkerRef.current) {
-        const vision = await FilesetResolver.forVisionTasks(
-          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
-        );
-        landmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath:
-              'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-            delegate: 'GPU',
-          },
-          runningMode: 'VIDEO',
-          numHands: 1,
-        });
-      }
-
-      if (!videoRef.current || !canvasRef.current) return;
-      const video = videoRef.current;
-
-      if (!video.srcObject) {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
-          audio: false,
-        });
-        video.srcObject = stream;
-        await video.play();
-      }
-
-      startGame();
-    } catch (err: unknown) {
-      console.error(err);
-      setGameStateSync('idle');
-      setErrorMsg('Accès caméra refusé ou indisponible.');
-    }
-  };
-
-  const startGame = () => {
-    setScore(0);
-    setTimeLeft(60);
-    particlesRef.current = [];
-    trailRef.current = [];
-    spawnNewPattern(3);
-    setGameStateSync('playing');
-
-    if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
-    animationFrameId.current = requestAnimationFrame(renderLoop);
-  };
-
-  const renderLoop = (now: number) => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const landmarker = landmarkerRef.current;
-
-    if (!video || !canvas || !landmarker) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    if (video.readyState >= 2) {
-      // Arrière-plan caméra
-      ctx.save();
-      ctx.translate(canvas.width, 0);
-      ctx.scale(-1, 1);
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      ctx.restore();
-
-      // Voile sombre
-      ctx.fillStyle = 'rgba(10, 15, 30, 0.70)';
+      // Nettoyage fond
+      ctx.fillStyle = '#050505';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // Traitement IA
-      if (now - lastAITimeRef.current > 20) {
-        lastAITimeRef.current = now;
-        const results = landmarker.detectForVideo(video, now);
+      if (gameState === 'PLAYING') {
+        const finger = simulatedFingerRef.current;
+        const pattern = patternRef.current;
+        const activeIdx = activeCheckpointRef.current;
 
-        if (results.landmarks && results.landmarks[0]) {
-          const indexTip = results.landmarks[0][8];
-          if (indexTip) {
-            const rawX = (1 - indexTip.x) * canvas.width;
-            const rawY = indexTip.y * canvas.height;
-
-            const zoneLeft = PLAY_ZONE.xMin * canvas.width;
-            const zoneRight = PLAY_ZONE.xMax * canvas.width;
-            const zoneTop = PLAY_ZONE.yMin * canvas.height;
-            const zoneBottom = PLAY_ZONE.yMax * canvas.height;
-
-            if (rawX >= zoneLeft && rawX <= zoneRight && rawY >= zoneTop && rawY <= zoneBottom) {
-              fingerPosRef.current = { x: rawX, y: rawY };
-            } else {
-              fingerPosRef.current = null;
-            }
-          }
-        } else {
-          fingerPosRef.current = null;
-        }
-      }
-
-      const finger = fingerPosRef.current;
-
-      if (gameStateRef.current === 'playing') {
-        const pattern = currentPatternRef.current;
-        const currentLvlInfo = getLevelInfo(score);
-
-        // 1. Lignes guides (Lvl 1 uniquement)
-        if (pattern.length > 0 && currentLvlInfo.level === 1) {
+        // A. DESSIN DU MOTIF DE CIBLES
+        if (pattern.length > 0) {
           ctx.beginPath();
-          pattern.forEach((pt, idx) => {
-            const pos = zoneToScreen(pt, canvas.width, canvas.height);
-            if (idx === 0) ctx.moveTo(pos.x, pos.y);
-            else ctx.lineTo(pos.x, pos.y);
-          });
-          ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+          ctx.moveTo(pattern[0].x, pattern[0].y);
+          for (let i = 1; i < pattern.length; i++) {
+            ctx.lineTo(pattern[i].x, pattern[i].y);
+          }
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
           ctx.lineWidth = 4;
           ctx.setLineDash([8, 8]);
           ctx.stroke();
           ctx.setLineDash([]);
+
+          // Points de passage
+          pattern.forEach((pt, idx) => {
+            const isActive = idx === activeIdx;
+            const isPassed = idx < activeIdx;
+
+            ctx.beginPath();
+            ctx.arc(pt.x, pt.y, isActive ? 22 : 14, 0, Math.PI * 2);
+            ctx.fillStyle = isPassed ? '#22c55e' : isActive ? '#3b82f6' : '#3f3f46';
+            ctx.fill();
+            ctx.strokeStyle = isActive ? '#93c5fd' : '#18181b';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+          });
         }
 
-        // 2. Points numérotés
-        pattern.forEach((pt, idx) => {
-          const pos = zoneToScreen(pt, canvas.width, canvas.height);
-          const isCurrent = idx === activeCheckpointRef.current;
-          const isPassed = idx < activeCheckpointRef.current;
+        // B. DESSIN DES MINES
+        minesRef.current.forEach((mine) => drawMine(ctx, mine));
 
-          ctx.beginPath();
-          ctx.arc(pos.x, pos.y, isCurrent ? 24 : 18, 0, Math.PI * 2);
-          ctx.fillStyle = isPassed
-            ? '#22c55e'
-            : isCurrent
-            ? '#f59e0b'
-            : 'rgba(30, 41, 59, 0.9)';
-          ctx.fill();
-
-          ctx.strokeStyle = isPassed ? '#86efac' : isCurrent ? '#fef08a' : '#64748b';
-          ctx.lineWidth = isCurrent ? 3 : 2;
-          ctx.stroke();
-
-          ctx.fillStyle = '#ffffff';
-          ctx.font = `bold ${isCurrent ? 16 : 13}px sans-serif`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(String(idx + 1), pos.x, pos.y);
-        });
-
-        // 3. TRAÎNÉE FLAMME/PLASMA INCANDESCENTE
+        // C. TRAÎNÉE DE FLAMME MULTI-COUCHE DU DOIGT
         if (finger) {
-          const nowTime = performance.now();
-          trailRef.current.push({ x: finger.x, y: finger.y, time: nowTime });
-
-          // Conserver 350 ms de mémoire de mouvement
-          trailRef.current = trailRef.current.filter((p) => nowTime - p.time < 350);
-
-          // Étincelles volatiles
-          if (Math.random() < 0.6) {
-            particlesRef.current.push({
-              x: finger.x + (Math.random() - 0.5) * 12,
-              y: finger.y + (Math.random() - 0.5) * 12,
-              vx: (Math.random() - 0.5) * 2,
-              vy: -Math.random() * 2 - 0.5,
-              size: Math.random() * 4 + 2,
-              color: ['#fef08a', '#f97316', '#ef4444'][Math.floor(Math.random() * 3)],
-              alpha: 1.0,
-            });
-          }
+          trailRef.current.push({ x: finger.x, y: finger.y });
+          if (trailRef.current.length > 25) trailRef.current.shift();
 
           if (trailRef.current.length > 1) {
             ctx.save();
-            // Fusion de couleurs néon
-            ctx.globalCompositeOperation = 'lighter';
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
 
-            // COUCHE 1 : Halo externe rouge/orange large
-            ctx.beginPath();
             for (let i = 0; i < trailRef.current.length - 1; i++) {
               const p1 = trailRef.current[i];
               const p2 = trailRef.current[i + 1];
+              const ratio = i / trailRef.current.length;
+
+              // Couche 1: Halo Rouge
+              ctx.beginPath();
               ctx.moveTo(p1.x, p1.y);
               ctx.lineTo(p2.x, p2.y);
-            }
-            ctx.strokeStyle = 'rgba(239, 68, 68, 0.65)';
-            ctx.lineWidth = 28;
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
-            ctx.stroke();
+              ctx.strokeStyle = `rgba(239, 68, 68, ${ratio * 0.45})`;
+              ctx.lineWidth = ratio * 34;
+              ctx.stroke();
 
-            // COUCHE 2 : Cœur jaune incandescent
-            ctx.beginPath();
-            for (let i = 0; i < trailRef.current.length - 1; i++) {
-              const p1 = trailRef.current[i];
-              const p2 = trailRef.current[i + 1];
+              // Couche 2: Corps Orange
+              ctx.beginPath();
               ctx.moveTo(p1.x, p1.y);
               ctx.lineTo(p2.x, p2.y);
-            }
-            ctx.strokeStyle = 'rgba(254, 240, 138, 0.85)';
-            ctx.lineWidth = 14;
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
-            ctx.stroke();
+              ctx.strokeStyle = `rgba(249, 115, 22, ${ratio * 0.85})`;
+              ctx.lineWidth = ratio * 18;
+              ctx.stroke();
 
-            // COUCHE 3 : Fil central blanc intense
-            ctx.beginPath();
-            for (let i = 0; i < trailRef.current.length - 1; i++) {
-              const p1 = trailRef.current[i];
-              const p2 = trailRef.current[i + 1];
+              // Couche 3: Cœur Jaune/Blanc
+              ctx.beginPath();
               ctx.moveTo(p1.x, p1.y);
               ctx.lineTo(p2.x, p2.y);
+              ctx.strokeStyle = `rgba(254, 240, 138, ${ratio})`;
+              ctx.lineWidth = ratio * 7;
+              ctx.stroke();
             }
-            ctx.strokeStyle = '#ffffff';
-            ctx.lineWidth = 4;
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
-            ctx.stroke();
-
-            // Orbe de lumière au bout du doigt
-            const grad = ctx.createRadialGradient(finger.x, finger.y, 2, finger.x, finger.y, 24);
-            grad.addColorStop(0, '#ffffff');
-            grad.addColorStop(0.3, '#fef08a');
-            grad.addColorStop(0.7, '#f97316');
-            grad.addColorStop(1, 'rgba(239, 68, 68, 0)');
-            ctx.fillStyle = grad;
-            ctx.beginPath();
-            ctx.arc(finger.x, finger.y, 24, 0, Math.PI * 2);
-            ctx.fill();
-
             ctx.restore();
+
+            // Étincelles volatiles
+            if (Math.random() < 0.6) {
+              particlesRef.current.push({
+                x: finger.x + (Math.random() - 0.5) * 10,
+                y: finger.y + (Math.random() - 0.5) * 10,
+                vx: (Math.random() - 0.5) * 3,
+                vy: (Math.random() - 0.5) * 3 - 1,
+                size: Math.random() * 4 + 2,
+                color: Math.random() > 0.5 ? '#fef08a' : '#f97316',
+                alpha: 1.0,
+              });
+            }
           }
 
-          // Validation du checkpoint (28px max)
-          const targetPt = pattern[activeCheckpointRef.current];
-          if (targetPt) {
-            const targetPos = zoneToScreen(targetPt, canvas.width, canvas.height);
-            const dist = Math.hypot(finger.x - targetPos.x, finger.y - targetPos.y);
+          // --- DETECT COLLISION AVEC LES MINES ---
+          for (let i = minesRef.current.length - 1; i >= 0; i--) {
+            const mine = minesRef.current[i];
+            const dist = Math.hypot(finger.x - mine.x, finger.y - mine.y);
 
-            if (dist < 28) {
-              triggerExplosion(targetPos.x, targetPos.y);
+            if (dist < mine.radius + 12) {
+              // Flash Noir
+              setIsFlashing(true);
+              setTimeout(() => setIsFlashing(false), 150);
+
+              // Dégâts Vies & Animation Cœur
+              setLives((prev) => {
+                const newLives = prev - 1;
+                setDamagedHeartIndex(newLives);
+                setTimeout(() => setDamagedHeartIndex(null), 500);
+
+                if (newLives <= 0) {
+                  setGameState('GAMEOVER');
+                }
+                return newLives;
+              });
+
+              // Détruire la mine
+              minesRef.current.splice(i, 1);
+            }
+          }
+
+          // --- VALIDATION DES POINTS CIBLES ---
+          const currentTarget = pattern[activeIdx];
+          if (currentTarget) {
+            const distToTarget = Math.hypot(finger.x - currentTarget.x, finger.y - currentTarget.y);
+            if (distToTarget < 28) {
+              triggerExplosion(currentTarget.x, currentTarget.y);
               activeCheckpointRef.current += 1;
 
+              // Forme terminée !
               if (activeCheckpointRef.current >= pattern.length) {
+                shapesCompletedRef.current += 1;
+                setShapesCount(shapesCompletedRef.current);
+
+                // Calcul du score
                 setScore((prevScore) => {
-                  const newScore = prevScore + currentLvlInfo.ptsPerShape;
+                  const newScore = prevScore + 100;
                   if (newScore > highScore) {
                     setHighScore(newScore);
                     localStorage.setItem('hyper_tracer_high_score', newScore.toString());
                   }
-
-                  const nextLvlInfo = getLevelInfo(newScore);
-                  setTimeLeft((t) => t + nextLvlInfo.timeBonus);
-
-                  setBonusNotification(`+${nextLvlInfo.timeBonus}s`);
-                  setTimeout(() => setBonusNotification(null), 800);
-
-                  spawnNewPattern(nextLvlInfo.numPoints);
                   return newScore;
                 });
+
+                // BONUS SEULEMENT TOUTES LES 3 FORMES
+                if (shapesCompletedRef.current % 3 === 0) {
+                  setTimeLeft((t) => t + 5);
+                  setBonusNotification('+5s');
+                  setTimeout(() => setBonusNotification(null), 1000);
+                }
+
+                // Générer la forme suivante
+                spawnNewShape();
               }
             }
           }
         } else {
-          trailRef.current = [];
+          if (trailRef.current.length > 0) trailRef.current.shift();
         }
 
-        // 4. Rendu des particules d'explosion
-        particlesRef.current = particlesRef.current.filter((p) => {
+        // D. PARTICULES & EXPLOSIONS
+        for (let i = particlesRef.current.length - 1; i >= 0; i--) {
+          const p = particlesRef.current[i];
           p.x += p.vx;
           p.y += p.vy;
-          p.alpha -= 0.04;
+          p.alpha -= 0.02;
 
-          if (p.alpha <= 0) return false;
-
-          ctx.save();
-          ctx.globalAlpha = Math.max(0, p.alpha);
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-          ctx.fillStyle = p.color;
-          ctx.fill();
-          ctx.restore();
-          return true;
-        });
+          if (p.alpha <= 0) {
+            particlesRef.current.splice(i, 1);
+          } else {
+            ctx.save();
+            ctx.globalAlpha = p.alpha;
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          }
+        }
       }
-    }
 
-    animationFrameId.current = requestAnimationFrame(renderLoop);
-  };
+      animFrameRef.current = requestAnimationFrame(render);
+    };
 
-  const levelInfo = getLevelInfo(score);
+    render();
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('pointermove', handlePointerMove);
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    };
+  }, [gameState, highScore]);
 
   return (
-    <div className="fixed inset-0 w-screen h-screen bg-slate-950 overflow-hidden select-none font-sans">
-      <video ref={videoRef} className="hidden" playsInline autoPlay muted />
-      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-cover" />
+    <div ref={containerRef} className="relative w-full h-screen bg-black overflow-hidden select-none font-sans">
+      {/* FLASH NOIR LORS DU CHOC MINE */}
+      {isFlashing && <div className="absolute inset-0 bg-black z-50 pointer-events-none" />}
 
-      {/* HUD Supérieur */}
-      <div className="absolute top-0 left-0 right-0 p-4 pt-6 flex flex-col items-center z-10 bg-gradient-to-b from-black/90 via-black/40 to-transparent pointer-events-none space-y-2">
-        <div className="flex justify-between items-center w-full max-w-md px-2">
-          {/* Badge Niveau */}
-          <div className="flex flex-col items-start">
-            <span
-              className="text-[10px] font-black uppercase tracking-widest px-2.5 py-0.5 rounded-full text-black shadow-md"
-              style={{ backgroundColor: levelInfo.color }}
-            >
-              LVL {levelInfo.level} • {levelInfo.name}
-            </span>
-            <p className="text-3xl font-black text-white mt-1 drop-shadow-md">
-              {score} <span className="text-xs text-slate-400 font-bold">PTS</span>
-            </p>
-          </div>
-
-          {/* Chrono */}
-          <div className="relative flex flex-col items-center">
-            <span className="text-[10px] text-slate-300 font-extrabold uppercase tracking-widest">CHRONO</span>
-            <p
-              className={`text-4xl font-black transition-transform ${
-                timeLeft <= 10 ? 'text-red-500 animate-ping' : 'text-amber-400'
-              }`}
-            >
-              {timeLeft}s
-            </p>
-
-            {bonusNotification && (
-              <span className="absolute -bottom-6 text-xl font-black text-green-400 animate-bounce drop-shadow-[0_0_10px_rgba(74,222,128,0.8)]">
-                {bonusNotification}
+      {/* BARRE HAUTE UI : TEMPS & VIES */}
+      {gameState === 'PLAYING' && (
+        <div className="absolute top-4 left-4 right-4 flex justify-between items-center z-40 pointer-events-none">
+          {/* SCORE & CHRONO */}
+          <div className="flex items-center gap-4">
+            <div className="bg-zinc-900/90 border border-zinc-800 px-5 py-2.5 rounded-2xl text-white font-mono text-2xl shadow-xl flex items-center gap-2">
+              <span>⏱️</span>
+              <span className={timeLeft <= 10 ? 'text-red-500 font-bold animate-pulse' : 'text-amber-400 font-bold'}>
+                {timeLeft}s
               </span>
-            )}
-          </div>
-
-          {/* Record */}
-          <div className="flex flex-col items-end">
-            <span className="text-[10px] text-slate-400 font-extrabold uppercase tracking-widest">RECORD</span>
-            <p className="text-3xl font-black text-emerald-400 drop-shadow-md">{highScore}</p>
-          </div>
-        </div>
-
-        {gameState === 'playing' && (
-          <div className="bg-black/60 border border-white/10 backdrop-blur-md px-4 py-1 rounded-full text-center">
-            <p className="text-xs font-bold text-slate-200">
-              {levelInfo.numPoints} points • <span className="text-green-400">+{levelInfo.timeBonus}s par forme</span>
-              {levelInfo.level > 1 && <span className="text-amber-400 ml-1">(Sans guide)</span>}
-            </p>
-          </div>
-        )}
-      </div>
-
-      {/* MODAL TUTORIEL */}
-      {showTutorial && (
-        <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-xl flex flex-col items-center justify-center p-6 text-center z-30 space-y-6">
-          <div className="max-w-sm space-y-4">
-            <div className="inline-block bg-amber-500/20 text-amber-400 border border-amber-500/30 px-3 py-1 rounded-full text-xs font-black uppercase tracking-widest">
-              Comment jouer ?
+              {bonusNotification && (
+                <span className="ml-2 text-green-400 text-lg font-bold animate-bounce">{bonusNotification}</span>
+              )}
             </div>
 
-            <h2 className="text-3xl font-black text-white">Règles Rapides ⚡</h2>
+            <div className="bg-zinc-900/90 border border-zinc-800 px-4 py-2.5 rounded-2xl text-zinc-300 font-mono text-lg">
+              Score: <span className="text-white font-bold">{score}</span>
+            </div>
+          </div>
 
-            <div className="space-y-3 text-left">
-              <div className="flex items-center space-x-3 bg-white/5 p-3 rounded-xl border border-white/10">
-                <span className="text-2xl">☝️</span>
-                <p className="text-xs text-slate-200">
-                  Relie les points numérotés <b>dans l'ordre (1 ➔ 2 ➔ 3)</b> avec ton index.
-                </p>
-              </div>
+          {/* VIES (HAUT À DROITE) */}
+          <div className="flex items-center gap-3 bg-zinc-900/90 border border-zinc-800 px-4 py-2.5 rounded-2xl shadow-xl">
+            {[0, 1, 2].map((index) => {
+              const isAlive = index < lives;
+              const isExploding = damagedHeartIndex === index;
 
-              <div className="flex items-center space-x-3 bg-white/5 p-3 rounded-xl border border-white/10">
-                <span className="text-2xl">⏱️</span>
-                <p className="text-xs text-slate-200">
-                  Chaque forme complétée t'accorde des <b>secondes de bonus</b> au chrono.
-                </p>
-              </div>
+              return (
+                <Heart
+                  key={index}
+                  className={`w-8 h-8 transition-all duration-300 ${
+                    isAlive
+                      ? 'text-red-500 fill-red-500 drop-shadow-[0_0_10px_rgba(239,68,68,0.8)]'
+                      : 'text-zinc-700 fill-zinc-900 scale-90 opacity-40'
+                  } ${isExploding ? 'animate-ping text-white fill-white scale-150' : ''}`}
+                />
+              );
+            })}
+          </div>
+        </div>
+      )}
 
-              <div className="flex items-center space-x-3 bg-white/5 p-3 rounded-xl border border-white/10">
-                <span className="text-2xl">🙈</span>
-                <p className="text-xs text-slate-200">
-                  <b>Attention :</b> Dès le Niveau 2 (200 pts), les tracés de guide disparaissent !
-                </p>
-              </div>
+      {/* BOUTON PLEIN ÉCRAN PERMANENT */}
+      <button
+        onClick={toggleFullscreen}
+        className="absolute bottom-4 right-4 z-40 bg-zinc-900/80 hover:bg-zinc-800 text-zinc-300 hover:text-white p-3 rounded-2xl border border-zinc-800 backdrop-blur transition active:scale-95 shadow-lg"
+        title="Mode Plein Écran"
+      >
+        <Maximize2 className="w-6 h-6" />
+      </button>
+
+      {/* ECAN DE DÉMARRAGE */}
+      {gameState === 'START' && (
+        <div className="absolute inset-0 bg-zinc-950/90 backdrop-blur-md z-40 flex flex-col items-center justify-center text-white p-6">
+          <div className="max-w-md text-center space-y-6">
+            <h1 className="text-5xl font-extrabold tracking-wider bg-gradient-to-r from-red-500 via-orange-400 to-yellow-300 bg-clip-text text-transparent">
+              HYPER TRACER
+            </h1>
+            <p className="text-zinc-400 text-sm leading-relaxed">
+              Pointe ton doigt pour relier les cibles lumineuses. Esquive impérativement les <span className="text-red-400 font-bold">mines mortelles</span> !
+            </p>
+
+            <div className="bg-zinc-900/80 p-4 rounded-2xl border border-zinc-800 text-left space-y-2 text-xs text-zinc-300">
+              <div className="flex items-center gap-2">⏱️ <span><strong>45s</strong> au départ, <strong>+5s</strong> tous les 3 motifs accomplis.</span></div>
+              <div className="flex items-center gap-2">❤️ <span><strong>3 vies</strong>. Toucher une mine détruit un cœur.</span></div>
+              <div className="flex items-center gap-2"><ShieldAlert className="w-4 h-4 text-red-500" /> <span>Attention au flash noir en cas d'impact !</span></div>
             </div>
 
             <button
-              onClick={startCameraAndGame}
-              className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 text-base uppercase tracking-wider transition-transform active:scale-95"
+              onClick={() => {
+                toggleFullscreen(); // Déclenche le plein écran
+                startGame();        // Démarre le jeu immédiatement
+              }}
+              className="w-full py-4 bg-gradient-to-r from-red-600 to-orange-600 hover:from-red-500 hover:to-orange-500 text-white font-bold text-xl rounded-2xl shadow-lg shadow-red-600/30 flex items-center justify-center gap-3 transition active:scale-95 cursor-pointer"
             >
-              C'est compris ! 🚀
+              <Play className="fill-white w-6 h-6" /> JOUER
             </button>
           </div>
         </div>
       )}
 
-      {/* ÉCRAN D'ACCUEIL */}
-      {gameState === 'idle' && !showTutorial && (
-        <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-lg flex flex-col items-center justify-center p-6 text-center z-20">
-          <div className="max-w-xs space-y-6">
-            <div className="inline-block bg-gradient-to-r from-orange-500 to-amber-400 p-3.5 rounded-2xl shadow-xl shadow-orange-500/20">
-              <span className="text-4xl">🔥</span>
+      {/* ÉCRAN DE GAME OVER */}
+      {gameState === 'GAMEOVER' && (
+        <div className="absolute inset-0 bg-black/95 backdrop-blur-md z-40 flex flex-col items-center justify-center text-white p-6">
+          <div className="max-w-md text-center space-y-6">
+            <h2 className="text-4xl font-extrabold text-red-500">PARTIE TERMINÉE</h2>
+            <div className="space-y-2 bg-zinc-900/90 border border-zinc-800 p-6 rounded-2xl">
+              <p className="text-zinc-400">Score final: <span className="text-2xl font-bold text-white">{score}</span></p>
+              <p className="text-zinc-400">Formes complétées: <span className="text-xl font-bold text-amber-400">{shapesCount}</span></p>
+              <p className="text-xs text-zinc-500 pt-2">Meilleur score: {highScore}</p>
             </div>
-            <h1 className="text-4xl font-black text-white tracking-tight">HYPER TRACER</h1>
-            <p className="text-sm text-slate-300 font-medium leading-relaxed">
-              Pointe ton index vers la caméra et relie les checkpoints le plus vite possible !
-            </p>
 
-            {errorMsg && <p className="text-xs font-bold text-red-400">{errorMsg}</p>}
-
-            <div className="space-y-3">
-              <button
-                onClick={startCameraAndGame}
-                className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 transition-transform active:scale-95 text-lg uppercase tracking-wider"
-              >
-                Jouer 🚀
-              </button>
-
-              <button
-                onClick={() => setShowTutorial(true)}
-                className="text-xs font-bold text-slate-400 hover:text-white underline tracking-wider uppercase"
-              >
-                Revoir le tuto
-              </button>
-            </div>
+            <button
+              onClick={() => {
+                toggleFullscreen();
+                startGame();
+              }}
+              className="w-full py-4 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-white font-bold text-xl rounded-2xl shadow-lg flex items-center justify-center gap-3 transition active:scale-95 cursor-pointer"
+            >
+              <RotateCcw className="w-6 h-6" /> RECOMMENCER
+            </button>
           </div>
         </div>
       )}
 
-      {/* CHARGEMENT */}
-      {gameState === 'loading' && (
-        <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-20 space-y-4">
-          <div className="w-12 h-12 border-4 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-xs font-black text-amber-300 tracking-widest uppercase">INITIALISATION CAPTEUR...</p>
-        </div>
-      )}
-
-      {/* GAME OVER */}
-      {gameState === 'gameover' && (
-        <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20 space-y-6">
-          <div className="space-y-2">
-            <h2 className="text-3xl font-black text-red-500 uppercase tracking-wider">TEMPS ÉCOULÉ !</h2>
-            <p className="text-xs text-slate-400 uppercase font-bold tracking-widest">Score Final</p>
-            <p className="text-6xl font-black text-white drop-shadow-lg">{score}</p>
-          </div>
-
-          {score >= highScore && score > 0 && (
-            <div className="bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 px-4 py-1.5 rounded-full text-xs font-black uppercase tracking-wider animate-pulse">
-              🏆 NOUVEAU RECORD !
-            </div>
-          )}
-
-          <button
-            onClick={startGame}
-            className="px-10 py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 transition-transform active:scale-95 text-lg uppercase tracking-wider"
-          >
-            Rejouer 🔄
-          </button>
-        </div>
-      )}
+      {/* CANVAS */}
+      <canvas ref={canvasRef} className="w-full h-full block cursor-none" />
     </div>
   );
-}
+};
