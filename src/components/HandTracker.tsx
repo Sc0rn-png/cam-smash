@@ -6,23 +6,18 @@ interface Point {
   y: number;
 }
 
+interface TrailPoint {
+  x: number;
+  y: number;
+  time: number;
+}
+
 interface Particle {
   x: number;
   y: number;
   vx: number;
   vy: number;
   size: number;
-  color: string;
-  alpha: number;
-  life: number;
-  maxLife: number;
-}
-
-interface FloatingText {
-  id: number;
-  text: string;
-  x: number;
-  y: number;
   color: string;
   alpha: number;
 }
@@ -34,13 +29,12 @@ const PLAY_ZONE = {
   yMax: 0.70,
 };
 
-// Générateur équitable de formes aléatoires bien espacées
 function generatePattern(numPoints: number): Point[] {
   const points: Point[] = [];
-  const minDist = 0.28;
+  const minDist = 0.3;
   let attempts = 0;
 
-  while (points.length < numPoints && attempts < 200) {
+  while (points.length < numPoints && attempts < 250) {
     attempts++;
     const candidate: Point = {
       x: Number((0.15 + Math.random() * 0.7).toFixed(2)),
@@ -53,12 +47,9 @@ function generatePattern(numPoints: number): Point[] {
       return Math.hypot(dx, dy) >= minDist;
     });
 
-    if (isFarEnough) {
-      points.push(candidate);
-    }
+    if (isFarEnough) points.push(candidate);
   }
 
-  // Fallback grille si tirage difficile
   if (points.length < numPoints) {
     const grid = [
       { x: 0.2, y: 0.2 },
@@ -78,6 +69,7 @@ export default function HandTracker() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const [gameState, setGameState] = useState<'idle' | 'loading' | 'playing' | 'gameover'>('idle');
+  const [showTutorial, setShowTutorial] = useState(false);
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(0);
   const [timeLeft, setTimeLeft] = useState(60);
@@ -91,8 +83,8 @@ export default function HandTracker() {
 
   const currentPatternRef = useRef<Point[]>([]);
   const activeCheckpointRef = useRef<number>(0);
+  const trailRef = useRef<TrailPoint[]>([]);
   const particlesRef = useRef<Particle[]>([]);
-  const floatingTextsRef = useRef<FloatingText[]>([]);
   const lastAITimeRef = useRef<number>(0);
   const fingerPosRef = useRef<Point | null>(null);
 
@@ -101,20 +93,22 @@ export default function HandTracker() {
     setGameState(state);
   };
 
-  // Calcul du niveau selon le score
   const getLevelInfo = (currentScore: number) => {
     if (currentScore >= 400) {
       return { level: 3, numPoints: 5, timeBonus: 6, name: 'OVERDRIVE', color: '#ec4899', ptsPerShape: 25 };
     }
     if (currentScore >= 200) {
-      return { level: 2, numPoints: 4, timeBonus: 8, name: 'SPEED', color: '#f59e0b', ptsPerShape: 15 };
+      return { level: 2, numPoints: 4, timeBonus: 8, name: 'EXPERT', color: '#f59e0b', ptsPerShape: 15 };
     }
-    return { level: 1, numPoints: 3, timeBonus: 10, name: 'INTENSE', color: '#06b6d4', ptsPerShape: 10 };
+    return { level: 1, numPoints: 3, timeBonus: 10, name: 'NOVICE', color: '#06b6d4', ptsPerShape: 10 };
   };
 
   useEffect(() => {
-    const saved = localStorage.getItem('hyper_tracer_high_score');
-    if (saved) setHighScore(parseInt(saved, 10));
+    const savedScore = localStorage.getItem('hyper_tracer_high_score');
+    if (savedScore) setHighScore(parseInt(savedScore, 10));
+
+    const tutoSeen = localStorage.getItem('hyper_tracer_tuto_seen');
+    if (!tutoSeen) setShowTutorial(true);
 
     const handleResize = () => {
       if (canvasRef.current) {
@@ -127,7 +121,6 @@ export default function HandTracker() {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // Timer principal
   useEffect(() => {
     let timer: NodeJS.Timeout;
     if (gameState === 'playing' && timeLeft > 0) {
@@ -144,43 +137,21 @@ export default function HandTracker() {
     return () => clearInterval(timer);
   }, [gameState, timeLeft]);
 
-  // Wake Lock
-  useEffect(() => {
-    const handleVisibilityChange = async () => {
-      if (wakeLockRef.current !== null && document.visibilityState === 'visible') {
-        try {
-          wakeLockRef.current = await navigator.wakeLock.request('screen');
-        } catch (err) {
-          console.warn('Wake Lock error:', err);
-        }
-      }
-    };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      if (wakeLockRef.current) {
-        wakeLockRef.current.release();
-        wakeLockRef.current = null;
-      }
-    };
-  }, []);
+  const closeTutorial = () => {
+    localStorage.setItem('hyper_tracer_tuto_seen', 'true');
+    setShowTutorial(false);
+  };
 
   const enableFullScreenAndWakeLock = async () => {
     try {
       if (!document.fullscreenElement) {
-        if (document.documentElement.requestFullscreen) {
-          await document.documentElement.requestFullscreen();
-        }
+        await document.documentElement.requestFullscreen().catch(() => {});
       }
-    } catch (err) {
-      console.warn('Fullscreen failed:', err);
-    }
-    try {
       if ('wakeLock' in navigator) {
         wakeLockRef.current = await navigator.wakeLock.request('screen');
       }
     } catch (err) {
-      console.warn('WakeLock failed:', err);
+      console.warn('Screen setup warn:', err);
     }
   };
 
@@ -195,41 +166,19 @@ export default function HandTracker() {
     };
   };
 
-  // Émission de particules de flamme
-  const emitFlameParticles = (x: number, y: number) => {
-    const fireColors = ['#ffffff', '#fef08a', '#f97316', '#ef4444', '#b91c1c'];
-    for (let i = 0; i < 4; i++) {
+  const triggerExplosion = (x: number, y: number) => {
+    const colors = ['#ffffff', '#fef08a', '#f97316', '#ef4444'];
+    for (let i = 0; i < 20; i++) {
       const angle = Math.random() * Math.PI * 2;
-      const speed = Math.random() * 3 + 1;
-      particlesRef.current.push({
-        x: x + (Math.random() - 0.5) * 8,
-        y: y + (Math.random() - 0.5) * 8,
-        vx: Math.cos(angle) * speed,
-        vy: Math.sin(angle) * speed - 1.5,
-        size: Math.random() * 8 + 4,
-        color: fireColors[Math.floor(Math.random() * fireColors.length)],
-        alpha: 1.0,
-        life: 1.0,
-        maxLife: Math.random() * 0.4 + 0.3,
-      });
-    }
-  };
-
-  // Explosion d'étincelles
-  const triggerExplosion = (x: number, y: number, color: string) => {
-    for (let i = 0; i < 35; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const speed = Math.random() * 12 + 4;
+      const speed = Math.random() * 9 + 3;
       particlesRef.current.push({
         x,
         y,
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed,
         size: Math.random() * 6 + 3,
-        color,
+        color: colors[Math.floor(Math.random() * colors.length)],
         alpha: 1.0,
-        life: 1.0,
-        maxLife: Math.random() * 0.5 + 0.5,
       });
     }
   };
@@ -240,6 +189,7 @@ export default function HandTracker() {
   };
 
   const startCameraAndGame = async () => {
+    if (showTutorial) closeTutorial();
     await enableFullScreenAndWakeLock();
     setGameStateSync('loading');
     setErrorMsg('');
@@ -275,8 +225,8 @@ export default function HandTracker() {
       startGame();
     } catch (err: unknown) {
       console.error(err);
-      setGameStateSync('error');
-      setErrorMsg(err instanceof Error ? err.message : 'Erreur caméra.');
+      setGameStateSync('idle');
+      setErrorMsg('Accès caméra refusé ou indisponible.');
     }
   };
 
@@ -284,7 +234,7 @@ export default function HandTracker() {
     setScore(0);
     setTimeLeft(60);
     particlesRef.current = [];
-    floatingTextsRef.current = [];
+    trailRef.current = [];
     spawnNewPattern(3);
     setGameStateSync('playing');
 
@@ -302,19 +252,19 @@ export default function HandTracker() {
     if (!ctx) return;
 
     if (video.readyState >= 2) {
-      // Miroir webcam
+      // Arrière-plan caméra
       ctx.save();
       ctx.translate(canvas.width, 0);
       ctx.scale(-1, 1);
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       ctx.restore();
 
-      // Assombrissement du fond pour faire ressortir les flammes
-      ctx.fillStyle = 'rgba(10, 10, 20, 0.55)';
+      // Voile sombre
+      ctx.fillStyle = 'rgba(10, 15, 30, 0.70)';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // Suivi IA
-      if (now - lastAITimeRef.current > 25) {
+      // Traitement IA
+      if (now - lastAITimeRef.current > 20) {
         lastAITimeRef.current = now;
         const results = landmarker.detectForVideo(video, now);
 
@@ -344,9 +294,10 @@ export default function HandTracker() {
 
       if (gameStateRef.current === 'playing') {
         const pattern = currentPatternRef.current;
+        const currentLvlInfo = getLevelInfo(score);
 
-        // Tracé des lignes reliant la forme
-        if (pattern.length > 0) {
+        // 1. Lignes guides (Lvl 1 uniquement)
+        if (pattern.length > 0 && currentLvlInfo.level === 1) {
           ctx.beginPath();
           pattern.forEach((pt, idx) => {
             const pos = zoneToScreen(pt, canvas.width, canvas.height);
@@ -354,118 +305,168 @@ export default function HandTracker() {
             else ctx.lineTo(pos.x, pos.y);
           });
           ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
-          ctx.lineWidth = 6;
-          ctx.lineCap = 'round';
-          ctx.lineJoin = 'round';
+          ctx.lineWidth = 4;
+          ctx.setLineDash([8, 8]);
           ctx.stroke();
+          ctx.setLineDash([]);
         }
 
-        // Checkpoints / Points numérotés
+        // 2. Points numérotés
         pattern.forEach((pt, idx) => {
           const pos = zoneToScreen(pt, canvas.width, canvas.height);
           const isCurrent = idx === activeCheckpointRef.current;
           const isPassed = idx < activeCheckpointRef.current;
 
           ctx.beginPath();
-          ctx.arc(pos.x, pos.y, isCurrent ? 26 : 18, 0, Math.PI * 2);
+          ctx.arc(pos.x, pos.y, isCurrent ? 24 : 18, 0, Math.PI * 2);
           ctx.fillStyle = isPassed
             ? '#22c55e'
             : isCurrent
             ? '#f59e0b'
-            : 'rgba(30, 41, 59, 0.85)';
+            : 'rgba(30, 41, 59, 0.9)';
           ctx.fill();
 
-          ctx.strokeStyle = isPassed ? '#86efac' : isCurrent ? '#fef08a' : '#94a3b8';
-          ctx.lineWidth = isCurrent ? 4 : 2;
+          ctx.strokeStyle = isPassed ? '#86efac' : isCurrent ? '#fef08a' : '#64748b';
+          ctx.lineWidth = isCurrent ? 3 : 2;
           ctx.stroke();
 
           ctx.fillStyle = '#ffffff';
-          ctx.font = `bold ${isCurrent ? 18 : 14}px sans-serif`;
+          ctx.font = `bold ${isCurrent ? 16 : 13}px sans-serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillText(String(idx + 1), pos.x, pos.y);
         });
 
-        // Validation du franchissement des points
-        const targetPt = pattern[activeCheckpointRef.current];
-        if (targetPt && finger) {
-          const targetPos = zoneToScreen(targetPt, canvas.width, canvas.height);
-          const dist = Math.hypot(finger.x - targetPos.x, finger.y - targetPos.y);
+        // 3. TRAÎNÉE FLAMME/PLASMA INCANDESCENTE
+        if (finger) {
+          const nowTime = performance.now();
+          trailRef.current.push({ x: finger.x, y: finger.y, time: nowTime });
 
-          // Émission du sillage de flammes au bout du doigt
-          emitFlameParticles(finger.x, finger.y);
+          // Conserver 350 ms de mémoire de mouvement
+          trailRef.current = trailRef.current.filter((p) => nowTime - p.time < 350);
 
-          if (dist < 48) {
-            triggerExplosion(targetPos.x, targetPos.y, '#f59e0b');
-            activeCheckpointRef.current += 1;
+          // Étincelles volatiles
+          if (Math.random() < 0.6) {
+            particlesRef.current.push({
+              x: finger.x + (Math.random() - 0.5) * 12,
+              y: finger.y + (Math.random() - 0.5) * 12,
+              vx: (Math.random() - 0.5) * 2,
+              vy: -Math.random() * 2 - 0.5,
+              size: Math.random() * 4 + 2,
+              color: ['#fef08a', '#f97316', '#ef4444'][Math.floor(Math.random() * 3)],
+              alpha: 1.0,
+            });
+          }
 
-            // Forme complétée !
-            if (activeCheckpointRef.current >= pattern.length) {
-              setScore((prevScore) => {
-                const newScore = prevScore + getLevelInfo(prevScore).ptsPerShape;
-                if (newScore > highScore) {
-                  setHighScore(newScore);
-                  localStorage.setItem('hyper_tracer_high_score', newScore.toString());
-                }
+          if (trailRef.current.length > 1) {
+            ctx.save();
+            // Fusion de couleurs néon
+            ctx.globalCompositeOperation = 'lighter';
 
-                const currentLvl = getLevelInfo(newScore);
-                
-                // Bonus de temps
-                setTimeLeft((t) => t + currentLvl.timeBonus);
+            // COUCHE 1 : Halo externe rouge/orange large
+            ctx.beginPath();
+            for (let i = 0; i < trailRef.current.length - 1; i++) {
+              const p1 = trailRef.current[i];
+              const p2 = trailRef.current[i + 1];
+              ctx.moveTo(p1.x, p1.y);
+              ctx.lineTo(p2.x, p2.y);
+            }
+            ctx.strokeStyle = 'rgba(239, 68, 68, 0.65)';
+            ctx.lineWidth = 28;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.stroke();
 
-                // Notification visuelle
-                setBonusNotification(`+${currentLvl.timeBonus}s`);
-                setTimeout(() => setBonusNotification(null), 800);
+            // COUCHE 2 : Cœur jaune incandescent
+            ctx.beginPath();
+            for (let i = 0; i < trailRef.current.length - 1; i++) {
+              const p1 = trailRef.current[i];
+              const p2 = trailRef.current[i + 1];
+              ctx.moveTo(p1.x, p1.y);
+              ctx.lineTo(p2.x, p2.y);
+            }
+            ctx.strokeStyle = 'rgba(254, 240, 138, 0.85)';
+            ctx.lineWidth = 14;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.stroke();
 
-                // Texte flottant
-                floatingTextsRef.current.push({
-                  id: Date.now(),
-                  text: `+${currentLvl.timeBonus}s`,
-                  x: targetPos.x,
-                  y: targetPos.y - 20,
-                  color: '#4ade80',
-                  alpha: 1.0,
+            // COUCHE 3 : Fil central blanc intense
+            ctx.beginPath();
+            for (let i = 0; i < trailRef.current.length - 1; i++) {
+              const p1 = trailRef.current[i];
+              const p2 = trailRef.current[i + 1];
+              ctx.moveTo(p1.x, p1.y);
+              ctx.lineTo(p2.x, p2.y);
+            }
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 4;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.stroke();
+
+            // Orbe de lumière au bout du doigt
+            const grad = ctx.createRadialGradient(finger.x, finger.y, 2, finger.x, finger.y, 24);
+            grad.addColorStop(0, '#ffffff');
+            grad.addColorStop(0.3, '#fef08a');
+            grad.addColorStop(0.7, '#f97316');
+            grad.addColorStop(1, 'rgba(239, 68, 68, 0)');
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(finger.x, finger.y, 24, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.restore();
+          }
+
+          // Validation du checkpoint (28px max)
+          const targetPt = pattern[activeCheckpointRef.current];
+          if (targetPt) {
+            const targetPos = zoneToScreen(targetPt, canvas.width, canvas.height);
+            const dist = Math.hypot(finger.x - targetPos.x, finger.y - targetPos.y);
+
+            if (dist < 28) {
+              triggerExplosion(targetPos.x, targetPos.y);
+              activeCheckpointRef.current += 1;
+
+              if (activeCheckpointRef.current >= pattern.length) {
+                setScore((prevScore) => {
+                  const newScore = prevScore + currentLvlInfo.ptsPerShape;
+                  if (newScore > highScore) {
+                    setHighScore(newScore);
+                    localStorage.setItem('hyper_tracer_high_score', newScore.toString());
+                  }
+
+                  const nextLvlInfo = getLevelInfo(newScore);
+                  setTimeLeft((t) => t + nextLvlInfo.timeBonus);
+
+                  setBonusNotification(`+${nextLvlInfo.timeBonus}s`);
+                  setTimeout(() => setBonusNotification(null), 800);
+
+                  spawnNewPattern(nextLvlInfo.numPoints);
+                  return newScore;
                 });
-
-                // Génération de la forme suivante
-                spawnNewPattern(currentLvl.numPoints);
-                return newScore;
-              });
+              }
             }
           }
+        } else {
+          trailRef.current = [];
         }
 
-        // Rendu & Mise à jour des Particules de Flammes
+        // 4. Rendu des particules d'explosion
         particlesRef.current = particlesRef.current.filter((p) => {
           p.x += p.vx;
           p.y += p.vy;
-          p.life -= 0.03;
-          p.size *= 0.95;
+          p.alpha -= 0.04;
 
-          if (p.life <= 0 || p.size <= 0.5) return false;
+          if (p.alpha <= 0) return false;
 
           ctx.save();
-          ctx.globalAlpha = Math.max(0, p.life);
+          ctx.globalAlpha = Math.max(0, p.alpha);
           ctx.beginPath();
           ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
           ctx.fillStyle = p.color;
           ctx.fill();
-          ctx.restore();
-          return true;
-        });
-
-        // Rendu des textes flottants (+10s)
-        floatingTextsRef.current = floatingTextsRef.current.filter((ft) => {
-          ft.y -= 1.8;
-          ft.alpha -= 0.025;
-          if (ft.alpha <= 0) return false;
-
-          ctx.save();
-          ctx.globalAlpha = Math.max(0, ft.alpha);
-          ctx.font = 'black 24px sans-serif';
-          ctx.fillStyle = ft.color;
-          ctx.textAlign = 'center';
-          ctx.fillText(ft.text, ft.x, ft.y);
           ctx.restore();
           return true;
         });
@@ -482,34 +483,33 @@ export default function HandTracker() {
       <video ref={videoRef} className="hidden" playsInline autoPlay muted />
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-cover" />
 
-      {/* HUD Supérieur - Style Arcade Modernisé */}
+      {/* HUD Supérieur */}
       <div className="absolute top-0 left-0 right-0 p-4 pt-6 flex flex-col items-center z-10 bg-gradient-to-b from-black/90 via-black/40 to-transparent pointer-events-none space-y-2">
         <div className="flex justify-between items-center w-full max-w-md px-2">
           {/* Badge Niveau */}
           <div className="flex flex-col items-start">
             <span
-              className="text-[10px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full text-black"
+              className="text-[10px] font-black uppercase tracking-widest px-2.5 py-0.5 rounded-full text-black shadow-md"
               style={{ backgroundColor: levelInfo.color }}
             >
               LVL {levelInfo.level} • {levelInfo.name}
             </span>
-            <p className="text-3xl font-black text-white mt-1 drop-shadow-md">{score} <span className="text-xs text-slate-400 font-bold">PTS</span></p>
+            <p className="text-3xl font-black text-white mt-1 drop-shadow-md">
+              {score} <span className="text-xs text-slate-400 font-bold">PTS</span>
+            </p>
           </div>
 
-          {/* Chrono central avec effet Dopamine sur Bonus */}
+          {/* Chrono */}
           <div className="relative flex flex-col items-center">
             <span className="text-[10px] text-slate-300 font-extrabold uppercase tracking-widest">CHRONO</span>
-            <div className="flex items-center space-x-1">
-              <p
-                className={`text-4xl font-black transition-transform ${
-                  timeLeft <= 10 ? 'text-red-500 animate-ping' : 'text-amber-400'
-                }`}
-              >
-                {timeLeft}s
-              </p>
-            </div>
+            <p
+              className={`text-4xl font-black transition-transform ${
+                timeLeft <= 10 ? 'text-red-500 animate-ping' : 'text-amber-400'
+              }`}
+            >
+              {timeLeft}s
+            </p>
 
-            {/* Notification flottante de temps additionnel */}
             {bonusNotification && (
               <span className="absolute -bottom-6 text-xl font-black text-green-400 animate-bounce drop-shadow-[0_0_10px_rgba(74,222,128,0.8)]">
                 {bonusNotification}
@@ -517,54 +517,108 @@ export default function HandTracker() {
             )}
           </div>
 
-          {/* Meilleur Score */}
+          {/* Record */}
           <div className="flex flex-col items-end">
             <span className="text-[10px] text-slate-400 font-extrabold uppercase tracking-widest">RECORD</span>
             <p className="text-3xl font-black text-emerald-400 drop-shadow-md">{highScore}</p>
           </div>
         </div>
 
-        {/* Indicateur explicatif du mode actuel */}
         {gameState === 'playing' && (
           <div className="bg-black/60 border border-white/10 backdrop-blur-md px-4 py-1 rounded-full text-center">
             <p className="text-xs font-bold text-slate-200">
-              {levelInfo.numPoints} points à relier <span className="text-green-400">(+{levelInfo.timeBonus}s par forme)</span>
+              {levelInfo.numPoints} points • <span className="text-green-400">+{levelInfo.timeBonus}s par forme</span>
+              {levelInfo.level > 1 && <span className="text-amber-400 ml-1">(Sans guide)</span>}
             </p>
           </div>
         )}
       </div>
 
-      {/* Écran d'accueil */}
-      {gameState === 'idle' && (
-        <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-lg flex flex-col items-center justify-center p-6 text-center z-20">
-          <div className="max-w-xs space-y-6">
-            <div className="inline-block bg-gradient-to-r from-orange-500 to-amber-400 p-3 rounded-2xl shadow-xl shadow-orange-500/20 mb-2">
-              <span className="text-4xl">🔥</span>
+      {/* MODAL TUTORIEL */}
+      {showTutorial && (
+        <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-xl flex flex-col items-center justify-center p-6 text-center z-30 space-y-6">
+          <div className="max-w-sm space-y-4">
+            <div className="inline-block bg-amber-500/20 text-amber-400 border border-amber-500/30 px-3 py-1 rounded-full text-xs font-black uppercase tracking-widest">
+              Comment jouer ?
             </div>
-            <h1 className="text-4xl font-black text-white tracking-tight">HYPER TRACER</h1>
-            <p className="text-sm text-slate-300 font-medium leading-relaxed">
-              Relie les checkpoints numérotés avec ton index pour gagner du temps et faire exploser ton score !
-            </p>
+
+            <h2 className="text-3xl font-black text-white">Règles Rapides ⚡</h2>
+
+            <div className="space-y-3 text-left">
+              <div className="flex items-center space-x-3 bg-white/5 p-3 rounded-xl border border-white/10">
+                <span className="text-2xl">☝️</span>
+                <p className="text-xs text-slate-200">
+                  Relie les points numérotés <b>dans l'ordre (1 ➔ 2 ➔ 3)</b> avec ton index.
+                </p>
+              </div>
+
+              <div className="flex items-center space-x-3 bg-white/5 p-3 rounded-xl border border-white/10">
+                <span className="text-2xl">⏱️</span>
+                <p className="text-xs text-slate-200">
+                  Chaque forme complétée t'accorde des <b>secondes de bonus</b> au chrono.
+                </p>
+              </div>
+
+              <div className="flex items-center space-x-3 bg-white/5 p-3 rounded-xl border border-white/10">
+                <span className="text-2xl">🙈</span>
+                <p className="text-xs text-slate-200">
+                  <b>Attention :</b> Dès le Niveau 2 (200 pts), les tracés de guide disparaissent !
+                </p>
+              </div>
+            </div>
 
             <button
               onClick={startCameraAndGame}
-              className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 transition-transform active:scale-95 text-lg uppercase tracking-wider"
+              className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 text-base uppercase tracking-wider transition-transform active:scale-95"
             >
-              Lancer la partie 🚀
+              C'est compris ! 🚀
             </button>
           </div>
         </div>
       )}
 
-      {/* Écran de Chargement */}
-      {gameState === 'loading' && (
-        <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-20 space-y-4">
-          <div className="w-12 h-12 border-4 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-sm font-bold text-amber-300 tracking-wider">CONNEXION CAPTEUR...</p>
+      {/* ÉCRAN D'ACCUEIL */}
+      {gameState === 'idle' && !showTutorial && (
+        <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-lg flex flex-col items-center justify-center p-6 text-center z-20">
+          <div className="max-w-xs space-y-6">
+            <div className="inline-block bg-gradient-to-r from-orange-500 to-amber-400 p-3.5 rounded-2xl shadow-xl shadow-orange-500/20">
+              <span className="text-4xl">🔥</span>
+            </div>
+            <h1 className="text-4xl font-black text-white tracking-tight">HYPER TRACER</h1>
+            <p className="text-sm text-slate-300 font-medium leading-relaxed">
+              Pointe ton index vers la caméra et relie les checkpoints le plus vite possible !
+            </p>
+
+            {errorMsg && <p className="text-xs font-bold text-red-400">{errorMsg}</p>}
+
+            <div className="space-y-3">
+              <button
+                onClick={startCameraAndGame}
+                className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 transition-transform active:scale-95 text-lg uppercase tracking-wider"
+              >
+                Jouer 🚀
+              </button>
+
+              <button
+                onClick={() => setShowTutorial(true)}
+                className="text-xs font-bold text-slate-400 hover:text-white underline tracking-wider uppercase"
+              >
+                Revoir le tuto
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
-      {/* Game Over - Relance Immédiate */}
+      {/* CHARGEMENT */}
+      {gameState === 'loading' && (
+        <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-20 space-y-4">
+          <div className="w-12 h-12 border-4 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-xs font-black text-amber-300 tracking-widest uppercase">INITIALISATION CAPTEUR...</p>
+        </div>
+      )}
+
+      {/* GAME OVER */}
       {gameState === 'gameover' && (
         <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20 space-y-6">
           <div className="space-y-2">
@@ -584,19 +638,6 @@ export default function HandTracker() {
             className="px-10 py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 transition-transform active:scale-95 text-lg uppercase tracking-wider"
           >
             Rejouer 🔄
-          </button>
-        </div>
-      )}
-
-      {/* Écran d'Erreur */}
-      {gameState === 'error' && (
-        <div className="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center z-20 space-y-4">
-          <p className="text-sm text-red-400 font-semibold">{errorMsg}</p>
-          <button
-            onClick={startCameraAndGame}
-            className="px-4 py-2 bg-slate-800 text-white text-xs rounded-lg border border-slate-700"
-          >
-            Réessayer
           </button>
         </div>
       )}
