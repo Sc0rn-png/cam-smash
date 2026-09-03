@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect } from 'react';
 import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
-import { Heart } from 'lucide-react';
+import { Heart, RefreshCw } from 'lucide-react';
 
 interface Point { x: number; y: number; }
 interface Mine { x: number; y: number; radius: number; }
@@ -39,8 +39,10 @@ export default function HandTracker() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  const [step, setStep] = useState<'init' | 'ready' | 'playing'>('init');
   const [gameState, setGameState] = useState<'idle' | 'loading' | 'playing' | 'gameover'>('idle');
-  const [showTutorial, setShowTutorial] = useState(false);
+  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
+
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(0);
   const [timeLeft, setTimeLeft] = useState(45);
@@ -55,6 +57,7 @@ export default function HandTracker() {
   const landmarkerRef = useRef<HandLandmarker | null>(null);
   const animationFrameId = useRef<number | null>(null);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   const currentPatternRef = useRef<Point[]>([]);
   const activeCheckpointRef = useRef<number>(0);
@@ -70,35 +73,22 @@ export default function HandTracker() {
     setGameState(state);
   };
 
+  const stopCameraStream = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  };
+
   const getLevelInfo = (currentScore: number) => {
-    if (currentScore >= 600) {
-      return { 
-        level: 5, numPoints: 6, name: 'OVERDRIVE', color: '#ec4899', orbColor: '#f43f5e', 
-        ptsPerShape: 30, showGuide: false, numMines: 3 
-      };
-    }
-    if (currentScore >= 420) {
-      return { 
-        level: 4, numPoints: 5, name: 'MASTER', color: '#a855f7', orbColor: '#c084fc', 
-        ptsPerShape: 25, showGuide: false, numMines: 3 
-      };
-    }
-    if (currentScore >= 260) {
-      return { 
-        level: 3, numPoints: 5, name: 'EXPERT', color: '#ef4444', orbColor: '#f97316', 
-        ptsPerShape: 20, showGuide: false, numMines: 2 
-      };
-    }
-    if (currentScore >= 120) {
-      return { 
-        level: 2, numPoints: 4, name: 'AVANCÉ', color: '#f59e0b', orbColor: '#eab308', 
-        ptsPerShape: 15, showGuide: true, numMines: 2 
-      };
-    }
-    return { 
-      level: 1, numPoints: 3, name: 'NOVICE', color: '#06b6d4', orbColor: '#38bdf8', 
-      ptsPerShape: 10, showGuide: true, numMines: 1 
-    };
+    if (currentScore >= 600) return { level: 5, numPoints: 6, name: 'OVERDRIVE', color: '#ec4899', orbColor: '#f43f5e', ptsPerShape: 30, showGuide: false, numMines: 3 };
+    if (currentScore >= 420) return { level: 4, numPoints: 5, name: 'MASTER', color: '#a855f7', orbColor: '#c084fc', ptsPerShape: 25, showGuide: false, numMines: 3 };
+    if (currentScore >= 260) return { level: 3, numPoints: 5, name: 'EXPERT', color: '#ef4444', orbColor: '#f97316', ptsPerShape: 20, showGuide: false, numMines: 2 };
+    if (currentScore >= 120) return { level: 2, numPoints: 4, name: 'AVANCÉ', color: '#f59e0b', orbColor: '#eab308', ptsPerShape: 15, showGuide: true, numMines: 2 };
+    return { level: 1, numPoints: 3, name: 'NOVICE', color: '#06b6d4', orbColor: '#38bdf8', ptsPerShape: 10, showGuide: true, numMines: 1 };
   };
 
   const requestWakeLock = async () => {
@@ -118,26 +108,9 @@ export default function HandTracker() {
     }
   };
 
-  // Demande le plein écran sans faire crasher l'exécution en cas de rejet par le navigateur
-  const tryEnterFullscreen = async () => {
-    try {
-      const doc = document.documentElement as any;
-      if (doc.requestFullscreen) {
-        await doc.requestFullscreen();
-      } else if (doc.webkitRequestFullscreen) {
-        await doc.webkitRequestFullscreen();
-      }
-    } catch (e) {
-      console.warn("L'activation du plein écran a été ignorée ou bloquée par le navigateur.", e);
-    }
-  };
-
   useEffect(() => {
     const savedScore = localStorage.getItem('hyper_tracer_high_score');
     if (savedScore) setHighScore(parseInt(savedScore, 10));
-
-    const tutoSeen = localStorage.getItem('hyper_tracer_tuto_seen');
-    if (!tutoSeen) setShowTutorial(true);
 
     const handleResize = () => {
       if (canvasRef.current) {
@@ -151,6 +124,7 @@ export default function HandTracker() {
     return () => {
       window.removeEventListener('resize', handleResize);
       if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
+      stopCameraStream();
       releaseWakeLock();
     };
   }, []);
@@ -172,16 +146,87 @@ export default function HandTracker() {
     return () => clearInterval(timer);
   }, [gameState, timeLeft]);
 
-  const handleLaunchGame = async () => {
-    // Essaye le plein écran immédiatement lors de l'action de l'utilisateur
-    tryEnterFullscreen();
-    requestWakeLock();
-    await startCameraAndGame();
+  // Initialisation ultra-sécurisée de la caméra
+  const handleInitCamera = async (overrideFacingMode?: 'user' | 'environment') => {
+    setGameStateSync('loading');
+    setErrorMsg('');
+
+    const targetMode = overrideFacingMode || facingMode;
+
+    try {
+      // Nettoyer les flux résiduels
+      stopCameraStream();
+
+      if (!landmarkerRef.current) {
+        const vision = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+        );
+        landmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath:
+              'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+            delegate: 'GPU',
+          },
+          runningMode: 'VIDEO',
+          numHands: 1,
+        });
+      }
+
+      if (!videoRef.current) throw new Error("Élément vidéo introuvable");
+
+      const constraints: MediaStreamConstraints = {
+        video: {
+          facingMode: targetMode,
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+        },
+        audio: false,
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      streamRef.current = stream;
+
+      const video = videoRef.current;
+      video.srcObject = stream;
+
+      await new Promise<void>((resolve) => {
+        video.onloadedmetadata = () => {
+          video.play().then(() => resolve());
+        };
+      });
+
+      setStep('ready');
+      setGameStateSync('idle');
+    } catch (err: any) {
+      console.error("Erreur d'accès vidéo:", err);
+      setGameStateSync('idle');
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        setErrorMsg('Accès caméra refusé. Autorise-le dans les paramètres de ton navigateur.');
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        setErrorMsg('Aucune caméra détectée sur cet appareil.');
+      } else {
+        setErrorMsg(`Erreur vidéo : ${err.message || 'Impossible de lancer la caméra'}`);
+      }
+    }
   };
 
-  const closeTutorial = () => {
-    localStorage.setItem('hyper_tracer_tuto_seen', 'true');
-    setShowTutorial(false);
+  const toggleCamera = () => {
+    const nextMode = facingMode === 'user' ? 'environment' : 'user';
+    setFacingMode(nextMode);
+    handleInitCamera(nextMode);
+  };
+
+  const handleStartFullscreenGame = () => {
+    const doc = document.documentElement as any;
+    if (doc.requestFullscreen) {
+      doc.requestFullscreen().catch(() => {});
+    } else if (doc.webkitRequestFullscreen) {
+      doc.webkitRequestFullscreen().catch(() => {});
+    }
+
+    requestWakeLock();
+    setStep('playing');
+    startGame();
   };
 
   const zoneToScreen = (pt: Point, width: number, height: number): Point => {
@@ -196,7 +241,7 @@ export default function HandTracker() {
   const spawnMines = (canvasWidth: number, canvasHeight: number, pattern: Point[], numMinesCount: number) => {
     const newMines: Mine[] = [];
     const minSafetyDist = 110;
-    const patternScreenPoints = pattern.map(pt => zoneToScreen(pt, canvasWidth, canvasHeight));
+    const patternScreenPoints = pattern.map((pt) => zoneToScreen(pt, canvasWidth, canvasHeight));
 
     let attempts = 0;
     while (newMines.length < numMinesCount && attempts < 200) {
@@ -280,47 +325,6 @@ export default function HandTracker() {
     spawnMines(canvasWidth, canvasHeight, pattern, numMinesCount);
   };
 
-  const startCameraAndGame = async () => {
-    if (showTutorial) closeTutorial();
-    setGameStateSync('loading');
-    setErrorMsg('');
-
-    try {
-      if (!landmarkerRef.current) {
-        const vision = await FilesetResolver.forVisionTasks(
-          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
-        );
-        landmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath:
-              'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-            delegate: 'GPU',
-          },
-          runningMode: 'VIDEO',
-          numHands: 1,
-        });
-      }
-
-      if (!videoRef.current || !canvasRef.current) return;
-      const video = videoRef.current;
-
-      if (!video.srcObject) {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
-          audio: false,
-        });
-        video.srcObject = stream;
-        await video.play();
-      }
-
-      startGame();
-    } catch (err) {
-      console.error('Erreur au chargement :', err);
-      setGameStateSync('idle');
-      setErrorMsg('Erreur caméra ou navigateur non supporté.');
-    }
-  };
-
   const startGame = () => {
     setScore(0);
     scoreRef.current = 0;
@@ -351,8 +355,10 @@ export default function HandTracker() {
 
     if (video.readyState >= 2) {
       ctx.save();
-      ctx.translate(canvas.width, 0);
-      ctx.scale(-1, 1);
+      if (facingMode === 'user') {
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
+      }
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       ctx.restore();
 
@@ -366,7 +372,7 @@ export default function HandTracker() {
         if (results.landmarks && results.landmarks[0]) {
           const indexTip = results.landmarks[0][8];
           if (indexTip) {
-            const rawX = (1 - indexTip.x) * canvas.width;
+            const rawX = facingMode === 'user' ? (1 - indexTip.x) * canvas.width : indexTip.x * canvas.width;
             const rawY = indexTip.y * canvas.height;
             fingerPosRef.current = { x: rawX, y: rawY };
           }
@@ -546,140 +552,144 @@ export default function HandTracker() {
 
   return (
     <div className="fixed inset-0 w-screen h-screen bg-slate-950 overflow-hidden select-none font-sans">
-      <video ref={videoRef} className="hidden" playsInline autoPlay muted />
+      {/* Élément vidéo configuré avec playsInline et muted pour contourner le blocage autoplay mobile */}
+      <video
+        ref={videoRef}
+        className="hidden"
+        playsInline
+        autoPlay
+        muted
+      />
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-cover" />
 
       {isFlashing && <div className="absolute inset-0 bg-black z-50 pointer-events-none" />}
 
-      <div className="absolute top-0 left-0 right-0 p-4 pt-6 flex flex-col items-center z-10 bg-gradient-to-b from-black/90 via-black/40 to-transparent pointer-events-none space-y-2">
-        <div className="flex justify-between items-center w-full max-w-md px-2">
-          <div className="flex flex-col items-start">
-            <span
-              className="text-[10px] font-black uppercase tracking-widest px-2.5 py-0.5 rounded-full text-black shadow-md"
-              style={{ backgroundColor: levelInfo.color }}
-            >
-              LVL {levelInfo.level}/5 • {levelInfo.name}
-            </span>
-            <p className="text-3xl font-black text-white mt-1 drop-shadow-md">
-              {score} <span className="text-xs text-slate-400 font-bold">PTS</span>
-            </p>
-          </div>
-
-          <div className="relative flex flex-col items-center">
-            <span className="text-[10px] text-slate-300 font-extrabold uppercase tracking-widest">CHRONO</span>
-            <p className={`text-4xl font-black transition-transform ${timeLeft <= 10 ? 'text-red-500 animate-ping' : 'text-amber-400'}`}>
-              {timeLeft}s
-            </p>
-            {bonusNotification && (
-              <span className="absolute -bottom-6 text-xl font-black text-green-400 animate-bounce drop-shadow-[0_0_10px_rgba(74,222,128,0.8)]">
-                {bonusNotification}
+      {step === 'playing' && (
+        <div className="absolute top-0 left-0 right-0 p-4 pt-6 flex flex-col items-center z-10 bg-gradient-to-b from-black/90 via-black/40 to-transparent pointer-events-none space-y-2">
+          <div className="flex justify-between items-center w-full max-w-md px-2">
+            <div className="flex flex-col items-start">
+              <span
+                className="text-[10px] font-black uppercase tracking-widest px-2.5 py-0.5 rounded-full text-black shadow-md"
+                style={{ backgroundColor: levelInfo.color }}
+              >
+                LVL {levelInfo.level}/5 • {levelInfo.name}
               </span>
-            )}
+              <p className="text-3xl font-black text-white mt-1 drop-shadow-md">
+                {score} <span className="text-xs text-slate-400 font-bold">PTS</span>
+              </p>
+            </div>
+
+            <div className="relative flex flex-col items-center">
+              <span className="text-[10px] text-slate-300 font-extrabold uppercase tracking-widest">CHRONO</span>
+              <p className={`text-4xl font-black transition-transform ${timeLeft <= 10 ? 'text-red-500 animate-ping' : 'text-amber-400'}`}>
+                {timeLeft}s
+              </p>
+              {bonusNotification && (
+                <span className="absolute -bottom-6 text-xl font-black text-green-400 animate-bounce drop-shadow-[0_0_10px_rgba(74,222,128,0.8)]">
+                  {bonusNotification}
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-1.5 bg-black/50 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/10">
+              {[0, 1, 2].map((index) => {
+                const isAlive = index < lives;
+                const isExploding = damagedHeartIndex === index;
+
+                return (
+                  <Heart
+                    key={index}
+                    className={`w-6 h-6 transition-all duration-300 ${
+                      isAlive
+                        ? 'text-red-500 fill-red-500 drop-shadow-[0_0_8px_rgba(239,68,68,0.8)]'
+                        : 'text-slate-700 fill-slate-900 opacity-30 scale-90'
+                    } ${isExploding ? 'animate-ping text-white fill-white scale-150' : ''}`}
+                  />
+                );
+              })}
+            </div>
           </div>
 
-          <div className="flex items-center gap-1.5 bg-black/50 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/10">
-            {[0, 1, 2].map((index) => {
-              const isAlive = index < lives;
-              const isExploding = damagedHeartIndex === index;
-
-              return (
-                <Heart
-                  key={index}
-                  className={`w-6 h-6 transition-all duration-300 ${
-                    isAlive
-                      ? 'text-red-500 fill-red-500 drop-shadow-[0_0_8px_rgba(239,68,68,0.8)]'
-                      : 'text-slate-700 fill-slate-900 opacity-30 scale-90'
-                  } ${isExploding ? 'animate-ping text-white fill-white scale-150' : ''}`}
-                />
-              );
-            })}
-          </div>
+          {gameState === 'playing' && (
+            <div className="bg-black/60 border border-white/10 backdrop-blur-md px-4 py-1 rounded-full text-center">
+              <p className="text-xs font-bold text-slate-200">
+                {levelInfo.numPoints} orbes • <span className="text-amber-400">+5s / 3 formes</span>
+                {!levelInfo.showGuide && <span className="text-red-400 ml-1.5">(Guide désactivé)</span>}
+              </p>
+            </div>
+          )}
         </div>
+      )}
 
-        {gameState === 'playing' && (
-          <div className="bg-black/60 border border-white/10 backdrop-blur-md px-4 py-1 rounded-full text-center">
-            <p className="text-xs font-bold text-slate-200">
-              {levelInfo.numPoints} orbes • <span className="text-amber-400">+5s / 3 formes</span>
-              {!levelInfo.showGuide && <span className="text-red-400 ml-1.5">(Guide désactivé)</span>}
+      {/* Étape 1 : Initialisation */}
+      {step === 'init' && (
+        <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-lg flex flex-col items-center justify-center p-6 text-center z-20">
+          <div className="max-w-xs space-y-6">
+            <div className="inline-block bg-gradient-to-r from-orange-500 to-amber-400 p-3.5 rounded-2xl shadow-xl shadow-orange-500/20">
+              <span className="text-4xl">📷</span>
+            </div>
+            <h1 className="text-3xl font-black text-white tracking-tight">ACTIVER LA CAMÉRA</h1>
+            <p className="text-xs text-slate-300 font-medium leading-relaxed">
+              Clique ci-dessous pour déclencher l'accès caméra.
             </p>
-          </div>
-        )}
-      </div>
 
-      {showTutorial && (
-        <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-xl flex flex-col items-center justify-center p-6 text-center z-30 space-y-6">
-          <div className="max-w-sm space-y-4">
-            <div className="inline-block bg-amber-500/20 text-amber-400 border border-amber-500/30 px-3 py-1 rounded-full text-xs font-black uppercase tracking-widest">
-              Règles du Jeu
-            </div>
-
-            <h2 className="text-3xl font-black text-white">Hyper Tracer ⚡</h2>
-
-            <div className="space-y-3 text-left">
-              <div className="flex items-center space-x-3 bg-white/5 p-3 rounded-xl border border-white/10">
-                <span className="text-2xl">☝️</span>
-                <p className="text-xs text-slate-200">
-                  Relie les orbes numérotées <b>(1 ➔ 2 ➔ 3...)</b> avec ton index.
-                </p>
+            {errorMsg && (
+              <div className="bg-red-500/10 border border-red-500/30 p-3 rounded-xl">
+                <p className="text-xs font-bold text-red-400">{errorMsg}</p>
               </div>
-
-              <div className="flex items-center space-x-3 bg-white/5 p-3 rounded-xl border border-white/10">
-                <span className="text-2xl">💣</span>
-                <p className="text-xs text-slate-200">
-                  Évite les <b>mines rouges</b> (jamais placées sur les orbes).
-                </p>
-              </div>
-            </div>
+            )}
 
             <button
-              onClick={handleLaunchGame}
-              className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 text-base uppercase tracking-wider transition-transform active:scale-95"
+              onClick={() => handleInitCamera()}
+              className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 transition-transform active:scale-95 text-base uppercase tracking-wider"
             >
-              C'est parti ! 🚀
+              Lancer la Caméra
             </button>
           </div>
         </div>
       )}
 
-      {gameState === 'idle' && !showTutorial && (
+      {/* Étape 2 : Validation flux vidéo + Plein écran */}
+      {step === 'ready' && (
         <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-lg flex flex-col items-center justify-center p-6 text-center z-20">
           <div className="max-w-xs space-y-6">
-            <div className="inline-block bg-gradient-to-r from-orange-500 to-amber-400 p-3.5 rounded-2xl shadow-xl shadow-orange-500/20">
-              <span className="text-4xl">🔥</span>
+            <div className="inline-block bg-gradient-to-r from-emerald-500 to-teal-400 p-3.5 rounded-2xl shadow-xl shadow-emerald-500/20">
+              <span className="text-4xl">📺</span>
             </div>
-            <h1 className="text-4xl font-black text-white tracking-tight">HYPER TRACER</h1>
-            <p className="text-sm text-slate-300 font-medium leading-relaxed">
-              Vise avec ton index et bats le chrono à travers les niveaux !
+            <h1 className="text-3xl font-black text-white tracking-tight">CAMÉRA DÉTECTÉE !</h1>
+            <p className="text-xs text-slate-300 font-medium leading-relaxed">
+              Passe en plein écran pour commencer à jouer.
             </p>
 
-            {errorMsg && <p className="text-xs font-bold text-red-400">{errorMsg}</p>}
-
-            <div className="space-y-3">
+            <div className="flex flex-col gap-3">
               <button
-                onClick={handleLaunchGame}
-                className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 transition-transform active:scale-95 text-lg uppercase tracking-wider"
+                onClick={handleStartFullscreenGame}
+                className="w-full py-4 bg-gradient-to-r from-emerald-400 to-teal-500 hover:from-emerald-300 hover:to-teal-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-emerald-500/30 transition-transform active:scale-95 text-base uppercase tracking-wider animate-pulse"
               >
-                Jouer 🚀
+                Plein Écran & Jouer 🚀
               </button>
 
               <button
-                onClick={() => setShowTutorial(true)}
-                className="text-xs font-bold text-slate-400 hover:text-white underline tracking-wider uppercase"
+                onClick={toggleCamera}
+                className="w-full py-2.5 bg-slate-800/80 hover:bg-slate-700 text-slate-300 font-bold rounded-xl border border-white/10 flex items-center justify-center gap-2 text-xs"
               >
-                Tutoriel
+                <RefreshCw className="w-3.5 h-3.5" />
+                Changer de caméra ({facingMode === 'user' ? 'Selfie' : 'Dorsale'})
               </button>
             </div>
           </div>
         </div>
       )}
 
+      {/* Chargement */}
       {gameState === 'loading' && (
-        <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-20 space-y-4">
+        <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-30 space-y-4">
           <div className="w-12 h-12 border-4 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-xs font-black text-amber-300 tracking-widest uppercase">LANCEMENT DE LA CAMÉRA...</p>
+          <p className="text-xs font-black text-amber-300 tracking-widest uppercase">INITIALISATION DU FLUX VIDEO...</p>
         </div>
       )}
 
+      {/* Fin de partie */}
       {gameState === 'gameover' && (
         <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20 space-y-6">
           <div className="space-y-2">
@@ -695,11 +705,7 @@ export default function HandTracker() {
           )}
 
           <button
-            onClick={async () => {
-              tryEnterFullscreen();
-              requestWakeLock();
-              startGame();
-            }}
+            onClick={() => startGame()}
             className="px-10 py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 transition-transform active:scale-95 text-lg uppercase tracking-wider"
           >
             Rejouer 🔄
