@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect } from 'react';
 import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
-import { Heart, Maximize2 } from 'lucide-react';
+import { Heart } from 'lucide-react';
 
 interface Point { x: number; y: number; }
 interface Mine { x: number; y: number; radius: number; }
@@ -38,7 +38,6 @@ function generatePattern(numPoints: number): Point[] {
 export default function HandTracker() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
 
   const [gameState, setGameState] = useState<'idle' | 'loading' | 'playing' | 'gameover'>('idle');
   const [showTutorial, setShowTutorial] = useState(false);
@@ -70,13 +69,36 @@ export default function HandTracker() {
     setGameState(state);
   };
 
-  // ÉCHELLE DES 5 NIVEAUX
+  // Niveaux avec thèmes de couleurs uniques pour les orbes
   const getLevelInfo = (currentScore: number) => {
-    if (currentScore >= 600) return { level: 5, numPoints: 6, name: 'OVERDRIVE', color: '#ec4899', ptsPerShape: 30, showGuide: false, numMines: 3 };
-    if (currentScore >= 420) return { level: 4, numPoints: 5, name: 'MASTER', color: '#a855f7', ptsPerShape: 25, showGuide: false, numMines: 3 };
-    if (currentScore >= 260) return { level: 3, numPoints: 5, name: 'EXPERT', color: '#ef4444', ptsPerShape: 20, showGuide: false, numMines: 2 };
-    if (currentScore >= 120) return { level: 2, numPoints: 4, name: 'AVANCÉ', color: '#f59e0b', ptsPerShape: 15, showGuide: true, numMines: 2 };
-    return { level: 1, numPoints: 3, name: 'NOVICE', color: '#06b6d4', ptsPerShape: 10, showGuide: true, numMines: 1 };
+    if (currentScore >= 600) {
+      return { 
+        level: 5, numPoints: 6, name: 'OVERDRIVE', color: '#ec4899', orbColor: '#f43f5e', 
+        ptsPerShape: 30, showGuide: false, numMines: 3 
+      };
+    }
+    if (currentScore >= 420) {
+      return { 
+        level: 4, numPoints: 5, name: 'MASTER', color: '#a855f7', orbColor: '#c084fc', 
+        ptsPerShape: 25, showGuide: false, numMines: 3 
+      };
+    }
+    if (currentScore >= 260) {
+      return { 
+        level: 3, numPoints: 5, name: 'EXPERT', color: '#ef4444', orbColor: '#f97316', 
+        ptsPerShape: 20, showGuide: false, numMines: 2 
+      };
+    }
+    if (currentScore >= 120) {
+      return { 
+        level: 2, numPoints: 4, name: 'AVANCÉ', color: '#f59e0b', orbColor: '#eab308', 
+        ptsPerShape: 15, showGuide: true, numMines: 2 
+      };
+    }
+    return { 
+      level: 1, numPoints: 3, name: 'NOVICE', color: '#06b6d4', orbColor: '#38bdf8', 
+      ptsPerShape: 10, showGuide: true, numMines: 1 
+    };
   };
 
   useEffect(() => {
@@ -117,13 +139,15 @@ export default function HandTracker() {
     return () => clearInterval(timer);
   }, [gameState, timeLeft]);
 
-  const toggleFullscreen = () => {
-    try {
-      if (!document.fullscreenElement && containerRef.current) {
-        containerRef.current.requestFullscreen().catch(() => {});
-      }
-    } catch (err) {
-      console.warn("Fullscreen non supporté:", err);
+  // Plein écran automatique au démarrage
+  const forceFullscreen = () => {
+    const docEl = document.documentElement as HTMLElement & {
+      webkitRequestFullscreen?: () => Promise<void>;
+    };
+    if (docEl.requestFullscreen) {
+      docEl.requestFullscreen().catch(() => {});
+    } else if (docEl.webkitRequestFullscreen) {
+      docEl.webkitRequestFullscreen().catch(() => {});
     }
   };
 
@@ -141,11 +165,9 @@ export default function HandTracker() {
     };
   };
 
-  // SPAWN MINE SÉCURISÉ (DISTANCE DES ORBES GARANTIE)
   const spawnMines = (canvasWidth: number, canvasHeight: number, pattern: Point[], numMinesCount: number) => {
     const newMines: Mine[] = [];
-    const minSafetyDist = 110; // Rayon de sécurité minimal autour de chaque orbe
-
+    const minSafetyDist = 110;
     const patternScreenPoints = pattern.map(pt => zoneToScreen(pt, canvasWidth, canvasHeight));
 
     let attempts = 0;
@@ -157,12 +179,10 @@ export default function HandTracker() {
         radius: 20,
       };
 
-      // Vérification de la distance vis-à-vis de tous les points de passage
       const isSafeFromOrbs = patternScreenPoints.every(
         (orb) => Math.hypot(orb.x - candidate.x, orb.y - candidate.y) >= minSafetyDist
       );
 
-      // Vérification de la distance entre mines elles-mêmes
       const isSafeFromOtherMines = newMines.every(
         (m) => Math.hypot(m.x - candidate.x, m.y - candidate.y) >= 60
       );
@@ -233,8 +253,8 @@ export default function HandTracker() {
   };
 
   const startCameraAndGame = async () => {
+    forceFullscreen();
     if (showTutorial) closeTutorial();
-    toggleFullscreen();
     setGameStateSync('loading');
     setErrorMsg('');
 
@@ -275,6 +295,7 @@ export default function HandTracker() {
   };
 
   const startGame = () => {
+    forceFullscreen();
     setScore(0);
     scoreRef.current = 0;
     setTimeLeft(45);
@@ -334,7 +355,6 @@ export default function HandTracker() {
         const pattern = currentPatternRef.current;
         const currentLvlInfo = getLevelInfo(scoreRef.current);
 
-        // Affichage du guide si autorisé par le niveau
         if (pattern.length > 0 && currentLvlInfo.showGuide) {
           ctx.beginPath();
           pattern.forEach((pt, idx) => {
@@ -356,10 +376,12 @@ export default function HandTracker() {
 
           ctx.beginPath();
           ctx.arc(pos.x, pos.y, isCurrent ? 24 : 18, 0, Math.PI * 2);
-          ctx.fillStyle = isPassed ? '#22c55e' : isCurrent ? '#f59e0b' : 'rgba(30, 41, 59, 0.9)';
+          
+          // Couleur dynamique selon le niveau !
+          ctx.fillStyle = isPassed ? '#22c55e' : isCurrent ? currentLvlInfo.orbColor : 'rgba(30, 41, 59, 0.9)';
           ctx.fill();
 
-          ctx.strokeStyle = isPassed ? '#86efac' : isCurrent ? '#fef08a' : '#64748b';
+          ctx.strokeStyle = isPassed ? '#86efac' : isCurrent ? '#ffffff' : '#64748b';
           ctx.lineWidth = isCurrent ? 3 : 2;
           ctx.stroke();
 
@@ -490,13 +512,15 @@ export default function HandTracker() {
       }
     }
 
-    animationFrameId.current = requestAnimationFrame(renderLoop);
+    if (gameStateRef.current === 'playing') {
+      animationFrameId.current = requestAnimationFrame(renderLoop);
+    }
   };
 
   const levelInfo = getLevelInfo(score);
 
   return (
-    <div ref={containerRef} className="fixed inset-0 w-screen h-screen bg-slate-950 overflow-hidden select-none font-sans">
+    <div className="fixed inset-0 w-screen h-screen bg-slate-950 overflow-hidden select-none font-sans">
       <video ref={videoRef} className="hidden" playsInline autoPlay muted />
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-cover" />
 
@@ -557,14 +581,6 @@ export default function HandTracker() {
         )}
       </div>
 
-      <button
-        onClick={toggleFullscreen}
-        className="absolute bottom-4 right-4 z-30 bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white p-3 rounded-2xl border border-white/10 backdrop-blur transition active:scale-95 shadow-lg"
-        title="Mode Plein Écran"
-      >
-        <Maximize2 className="w-5 h-5" />
-      </button>
-
       {showTutorial && (
         <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-xl flex flex-col items-center justify-center p-6 text-center z-30 space-y-6">
           <div className="max-w-sm space-y-4">
@@ -585,14 +601,7 @@ export default function HandTracker() {
               <div className="flex items-center space-x-3 bg-white/5 p-3 rounded-xl border border-white/10">
                 <span className="text-2xl">💣</span>
                 <p className="text-xs text-slate-200">
-                  Évite les <b>mines rouges</b> (placées hors des orbes).
-                </p>
-              </div>
-
-              <div className="flex items-center space-x-3 bg-white/5 p-3 rounded-xl border border-white/10">
-                <span className="text-2xl">🏆</span>
-                <p className="text-xs text-slate-200">
-                  Franchis les <b>5 niveaux</b> : les lignes-guides disparaissent au niveau 3 !
+                  Évite les <b>mines rouges</b> (jamais placées sur les orbes).
                 </p>
               </div>
             </div>
@@ -615,7 +624,7 @@ export default function HandTracker() {
             </div>
             <h1 className="text-4xl font-black text-white tracking-tight">HYPER TRACER</h1>
             <p className="text-sm text-slate-300 font-medium leading-relaxed">
-              Vise avec ton index et bats le chrono à travers 5 niveaux de difficulté !
+              Vise avec ton index et bats le chrono à travers les niveaux !
             </p>
 
             {errorMsg && <p className="text-xs font-bold text-red-400">{errorMsg}</p>}
