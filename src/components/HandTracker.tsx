@@ -118,12 +118,17 @@ export default function HandTracker() {
     }
   };
 
-  const enterFullscreen = () => {
-    const doc = document.documentElement as any;
-    if (doc.requestFullscreen) {
-      doc.requestFullscreen().catch(() => {});
-    } else if (doc.webkitRequestFullscreen) {
-      doc.webkitRequestFullscreen().catch(() => {});
+  // Demande le plein écran sans faire crasher l'exécution en cas de rejet par le navigateur
+  const tryEnterFullscreen = async () => {
+    try {
+      const doc = document.documentElement as any;
+      if (doc.requestFullscreen) {
+        await doc.requestFullscreen();
+      } else if (doc.webkitRequestFullscreen) {
+        await doc.webkitRequestFullscreen();
+      }
+    } catch (e) {
+      console.warn("L'activation du plein écran a été ignorée ou bloquée par le navigateur.", e);
     }
   };
 
@@ -167,10 +172,11 @@ export default function HandTracker() {
     return () => clearInterval(timer);
   }, [gameState, timeLeft]);
 
-  const handleLaunchGame = () => {
-    enterFullscreen();
+  const handleLaunchGame = async () => {
+    // Essaye le plein écran immédiatement lors de l'action de l'utilisateur
+    tryEnterFullscreen();
     requestWakeLock();
-    startCameraAndGame();
+    await startCameraAndGame();
   };
 
   const closeTutorial = () => {
@@ -309,9 +315,9 @@ export default function HandTracker() {
 
       startGame();
     } catch (err) {
-      console.error(err);
+      console.error('Erreur au chargement :', err);
       setGameStateSync('idle');
-      setErrorMsg('Accès caméra refusé ou indisponible.');
+      setErrorMsg('Erreur caméra ou navigateur non supporté.');
     }
   };
 
@@ -689,8 +695,8 @@ export default function HandTracker() {
           )}
 
           <button
-            onClick={() => {
-              enterFullscreen();
+            onClick={async () => {
+              tryEnterFullscreen();
               requestWakeLock();
               startGame();
             }}
