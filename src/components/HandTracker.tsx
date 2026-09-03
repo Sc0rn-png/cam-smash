@@ -35,7 +35,6 @@ function generatePattern(numPoints: number): Point[] {
   return points;
 }
 
-// Phrases sarcastiques style Claptrap
 const TIME_OVER_QUOTES = [
   "Le temps s'est écoulé ! Tes réflexes aussi apparemment... ⏳",
   "Oof. La lenteur incarnée. Même un paresseux sous caféine va plus vite. 🐢",
@@ -133,7 +132,6 @@ export default function HandTracker() {
     }
   };
 
-  // Fonction dédiée au passage en Plein Écran
   const requestFullscreenMode = () => {
     const docEl = document.documentElement as any;
     if (docEl.requestFullscreen) {
@@ -180,7 +178,25 @@ export default function HandTracker() {
     return () => clearInterval(timer);
   }, [gameState, timeLeft]);
 
+  const triggerGameOverImpact = (reason: 'time' | 'mine') => {
+    setIsFlashing(true);
+    setTimeout(() => setIsFlashing(false), 250);
+
+    if (reason === 'mine' && canvasRef.current) {
+      const ctx = canvasRef.current.getContext('2d');
+      if (ctx) {
+        for (let i = 0; i < 50; i++) {
+          triggerExplosion(
+            Math.random() * canvasRef.current.width,
+            Math.random() * canvasRef.current.height
+          );
+        }
+      }
+    }
+  };
+
   const handleGameOver = (reason: 'time' | 'mine') => {
+    triggerGameOverImpact(reason);
     setGameOverReason(reason);
     setGameStateSync('gameover');
     releaseWakeLock();
@@ -249,7 +265,6 @@ export default function HandTracker() {
   };
 
   const launchGame = async () => {
-    // Exécuté immédiatement sur le clic du bouton
     requestFullscreenMode();
 
     const isReady = await initCameraAndModel();
@@ -583,7 +598,7 @@ export default function HandTracker() {
       <video ref={videoRef} className="hidden" playsInline autoPlay muted />
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-cover" />
 
-      {isFlashing && <div className="absolute inset-0 bg-black z-50 pointer-events-none" />}
+      {isFlashing && <div className="absolute inset-0 bg-white z-50 pointer-events-none transition-opacity duration-150" />}
 
       {/* PAGE D'ACCUEIL */}
       {currentScreen === 'home' && (
@@ -616,7 +631,10 @@ export default function HandTracker() {
             )}
 
             <button
-              onClick={launchGame}
+              onClick={() => {
+                requestFullscreenMode();
+                launchGame();
+              }}
               className="w-full py-4 bg-gradient-to-r from-amber-500 via-orange-500 to-red-500 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/25 active:scale-95 transition-transform flex items-center justify-center gap-2 text-lg uppercase tracking-wider"
             >
               <Play className="w-5 h-5 fill-slate-950" /> JOUER DIRECT
@@ -647,7 +665,10 @@ export default function HandTracker() {
               Étape {tutoStep} / 4
             </span>
             <button
-              onClick={launchGame}
+              onClick={() => {
+                requestFullscreenMode();
+                launchGame();
+              }}
               className="flex items-center gap-1 text-xs font-bold text-slate-400 hover:text-white px-3 py-1.5 rounded-full bg-slate-900 border border-white/10 active:scale-95"
             >
               Skip <SkipForward className="w-3 h-3" />
@@ -732,7 +753,10 @@ export default function HandTracker() {
               </button>
             ) : (
               <button
-                onClick={launchGame}
+                onClick={() => {
+                  requestFullscreenMode();
+                  launchGame();
+                }}
                 className="w-full py-4 bg-gradient-to-r from-emerald-400 to-teal-500 text-slate-950 font-black rounded-2xl shadow-xl shadow-emerald-500/30 active:scale-95 transition-transform flex items-center justify-center gap-2 text-base uppercase tracking-wider animate-bounce"
               >
                 C'est parti ! 🚀
@@ -810,42 +834,59 @@ export default function HandTracker() {
 
       {/* FIN DE PARTIE */}
       {gameState === 'gameover' && (
-        <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-50 space-y-6">
-          <div className="space-y-2">
-            <h2 className="text-3xl font-black text-red-500 uppercase tracking-wider">
-              {gameOverReason === 'mine' ? 'BOOM ! EXPLOSION' : 'TEMPS ÉCOULÉ'}
+        <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-xl flex flex-col justify-between p-6 z-50 text-center animate-in fade-in duration-300">
+          <div className="pt-8 space-y-2">
+            <span className={`text-[10px] font-black uppercase tracking-[0.2em] px-3 py-1 rounded-full border ${
+              gameOverReason === 'mine'
+                ? 'bg-red-500/10 text-red-400 border-red-500/20'
+                : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+            }`}>
+              {gameOverReason === 'mine' ? 'BOOM ! EXPLOSION' : 'ÉPUISEMENT DU TEMPS'}
+            </span>
+            <h2 className="text-4xl font-black text-white uppercase tracking-tight">
+              GAME OVER
             </h2>
-            <p className="text-xs text-slate-400 uppercase font-bold tracking-widest">Score Final</p>
-            <p className="text-6xl font-black text-white drop-shadow-lg">{score}</p>
           </div>
 
-          {endQuote && (
-            <div className="bg-slate-900/90 border border-white/10 p-4 rounded-2xl max-w-xs shadow-xl">
-              <p className="text-xs font-semibold text-amber-300 leading-relaxed italic">
-                "{endQuote}"
+          <div className="my-auto space-y-6 max-w-xs mx-auto w-full">
+            <div className="bg-slate-900/90 border border-white/10 rounded-2xl p-5 shadow-2xl relative overflow-hidden">
+              <p className="text-xs text-slate-400 font-bold uppercase tracking-wider mb-1">Score Final</p>
+              <p className="text-5xl font-black text-amber-400 drop-shadow-[0_0_15px_rgba(251,191,36,0.3)]">
+                {score} <span className="text-base text-slate-500">PTS</span>
               </p>
-            </div>
-          )}
 
-          <div className="flex flex-col gap-3 w-full max-w-xs">
+              {score >= highScore && score > 0 && (
+                <span className="inline-block mt-3 text-[10px] font-black text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-0.5 rounded-full uppercase tracking-widest">
+                  Nouveau Record !
+                </span>
+              )}
+            </div>
+
+            {endQuote && (
+              <div className="bg-slate-900/50 border border-amber-500/20 rounded-2xl p-4 shadow-lg">
+                <p className="text-xs font-bold text-amber-200/90 italic leading-relaxed">
+                  "{endQuote}"
+                </p>
+              </div>
+            )}
+          </div>
+
+          <div className="pb-6 max-w-xs mx-auto w-full space-y-3">
             <button
               onClick={() => {
                 requestFullscreenMode();
                 startGame();
               }}
-              className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 active:scale-95 transition-transform text-lg uppercase tracking-wider flex items-center justify-center gap-2"
+              className="w-full py-4 bg-gradient-to-r from-amber-500 via-orange-500 to-red-500 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/25 active:scale-95 transition-transform flex items-center justify-center gap-2 text-lg uppercase tracking-wider"
             >
               <RotateCcw className="w-5 h-5" /> REJOUER
             </button>
 
             <button
-              onClick={() => {
-                setGameStateSync('idle');
-                setCurrentScreen('home');
-              }}
-              className="w-full py-3 bg-slate-900 text-slate-400 font-bold rounded-xl border border-white/10 text-xs hover:text-white"
+              onClick={() => setCurrentScreen('home')}
+              className="w-full py-3 bg-slate-900 hover:bg-slate-800 text-slate-400 font-bold rounded-2xl border border-white/10 active:scale-95 transition-transform text-xs uppercase tracking-wider"
             >
-              Retour au menu
+              Menu Principal
             </button>
           </div>
         </div>
