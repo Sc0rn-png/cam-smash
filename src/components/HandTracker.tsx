@@ -10,10 +10,10 @@ const PLAY_ZONE = { xMin: 0.1, xMax: 0.9, yMin: 0.2, yMax: 0.8 };
 
 function generatePattern(numPoints: number): Point[] {
   const points: Point[] = [];
-  const minDist = 0.28;
+  const minDist = 0.22;
   let attempts = 0;
 
-  while (points.length < numPoints && attempts < 200) {
+  while (points.length < numPoints && attempts < 300) {
     attempts++;
     const candidate: Point = {
       x: Number((0.15 + Math.random() * 0.7).toFixed(2)),
@@ -25,7 +25,10 @@ function generatePattern(numPoints: number): Point[] {
   }
 
   if (points.length < numPoints) {
-    const grid = [{ x: 0.2, y: 0.2 }, { x: 0.8, y: 0.2 }, { x: 0.5, y: 0.5 }, { x: 0.2, y: 0.8 }, { x: 0.8, y: 0.8 }];
+    const grid = [
+      { x: 0.2, y: 0.2 }, { x: 0.8, y: 0.2 }, { x: 0.5, y: 0.5 },
+      { x: 0.2, y: 0.8 }, { x: 0.8, y: 0.8 }, { x: 0.5, y: 0.2 }
+    ];
     return grid.slice(0, numPoints);
   }
 
@@ -48,9 +51,8 @@ export default function HandTracker() {
   const [isFlashing, setIsFlashing] = useState(false);
   const [damagedHeartIndex, setDamagedHeartIndex] = useState<number | null>(null);
 
-  // Refs de synchronisation
   const gameStateRef = useRef(gameState);
-  const scoreRef = useRef(0); // FIX: Référence pour éviter la stale closure
+  const scoreRef = useRef(0);
   const landmarkerRef = useRef<HandLandmarker | null>(null);
   const animationFrameId = useRef<number | null>(null);
 
@@ -68,10 +70,13 @@ export default function HandTracker() {
     setGameState(state);
   };
 
+  // ÉCHELLE DES 5 NIVEAUX
   const getLevelInfo = (currentScore: number) => {
-    if (currentScore >= 400) return { level: 3, numPoints: 5, name: 'OVERDRIVE', color: '#ec4899', ptsPerShape: 25 };
-    if (currentScore >= 200) return { level: 2, numPoints: 4, name: 'EXPERT', color: '#f59e0b', ptsPerShape: 15 };
-    return { level: 1, numPoints: 3, name: 'NOVICE', color: '#06b6d4', ptsPerShape: 10 };
+    if (currentScore >= 600) return { level: 5, numPoints: 6, name: 'OVERDRIVE', color: '#ec4899', ptsPerShape: 30, showGuide: false, numMines: 3 };
+    if (currentScore >= 420) return { level: 4, numPoints: 5, name: 'MASTER', color: '#a855f7', ptsPerShape: 25, showGuide: false, numMines: 3 };
+    if (currentScore >= 260) return { level: 3, numPoints: 5, name: 'EXPERT', color: '#ef4444', ptsPerShape: 20, showGuide: false, numMines: 2 };
+    if (currentScore >= 120) return { level: 2, numPoints: 4, name: 'AVANCÉ', color: '#f59e0b', ptsPerShape: 15, showGuide: true, numMines: 2 };
+    return { level: 1, numPoints: 3, name: 'NOVICE', color: '#06b6d4', ptsPerShape: 10, showGuide: true, numMines: 1 };
   };
 
   useEffect(() => {
@@ -136,16 +141,35 @@ export default function HandTracker() {
     };
   };
 
-  const spawnMines = (canvasWidth: number, canvasHeight: number) => {
+  // SPAWN MINE SÉCURISÉ (DISTANCE DES ORBES GARANTIE)
+  const spawnMines = (canvasWidth: number, canvasHeight: number, pattern: Point[], numMinesCount: number) => {
     const newMines: Mine[] = [];
-    const numMines = Math.floor(Math.random() * 2) + 1;
+    const minSafetyDist = 110; // Rayon de sécurité minimal autour de chaque orbe
 
-    for (let i = 0; i < numMines; i++) {
-      newMines.push({
+    const patternScreenPoints = pattern.map(pt => zoneToScreen(pt, canvasWidth, canvasHeight));
+
+    let attempts = 0;
+    while (newMines.length < numMinesCount && attempts < 200) {
+      attempts++;
+      const candidate: Mine = {
         x: PLAY_ZONE.xMin * canvasWidth + Math.random() * (PLAY_ZONE.xMax - PLAY_ZONE.xMin) * canvasWidth,
         y: PLAY_ZONE.yMin * canvasHeight + Math.random() * (PLAY_ZONE.yMax - PLAY_ZONE.yMin) * canvasHeight,
         radius: 20,
-      });
+      };
+
+      // Vérification de la distance vis-à-vis de tous les points de passage
+      const isSafeFromOrbs = patternScreenPoints.every(
+        (orb) => Math.hypot(orb.x - candidate.x, orb.y - candidate.y) >= minSafetyDist
+      );
+
+      // Vérification de la distance entre mines elles-mêmes
+      const isSafeFromOtherMines = newMines.every(
+        (m) => Math.hypot(m.x - candidate.x, m.y - candidate.y) >= 60
+      );
+
+      if (isSafeFromOrbs && isSafeFromOtherMines) {
+        newMines.push(candidate);
+      }
     }
     minesRef.current = newMines;
   };
@@ -201,10 +225,11 @@ export default function HandTracker() {
     }
   };
 
-  const spawnNewPattern = (numPoints: number, canvasWidth: number, canvasHeight: number) => {
-    currentPatternRef.current = generatePattern(numPoints);
+  const spawnNewPattern = (numPoints: number, canvasWidth: number, canvasHeight: number, numMinesCount: number) => {
+    const pattern = generatePattern(numPoints);
+    currentPatternRef.current = pattern;
     activeCheckpointRef.current = 0;
-    spawnMines(canvasWidth, canvasHeight);
+    spawnMines(canvasWidth, canvasHeight, pattern, numMinesCount);
   };
 
   const startCameraAndGame = async () => {
@@ -251,15 +276,16 @@ export default function HandTracker() {
 
   const startGame = () => {
     setScore(0);
-    scoreRef.current = 0; // FIX: Synchronisation de la ref
+    scoreRef.current = 0;
     setTimeLeft(45);
     setLives(3);
     shapesCompletedRef.current = 0;
     particlesRef.current = [];
     trailRef.current = [];
 
+    const initialLvl = getLevelInfo(0);
     if (canvasRef.current) {
-      spawnNewPattern(3, canvasRef.current.width, canvasRef.current.height);
+      spawnNewPattern(initialLvl.numPoints, canvasRef.current.width, canvasRef.current.height, initialLvl.numMines);
     }
 
     setGameStateSync('playing');
@@ -306,10 +332,10 @@ export default function HandTracker() {
 
       if (gameStateRef.current === 'playing') {
         const pattern = currentPatternRef.current;
-        // FIX: On lit la ref au lieu du state figé
         const currentLvlInfo = getLevelInfo(scoreRef.current);
 
-        if (pattern.length > 0 && currentLvlInfo.level === 1) {
+        // Affichage du guide si autorisé par le niveau
+        if (pattern.length > 0 && currentLvlInfo.showGuide) {
           ctx.beginPath();
           pattern.forEach((pt, idx) => {
             const pos = zoneToScreen(pt, canvas.width, canvas.height);
@@ -421,7 +447,7 @@ export default function HandTracker() {
 
                 setScore((prevScore) => {
                   const newScore = prevScore + currentLvlInfo.ptsPerShape;
-                  scoreRef.current = newScore; // FIX: Mettre à jour la ref immédiatement
+                  scoreRef.current = newScore;
 
                   if (newScore > highScore) {
                     setHighScore(newScore);
@@ -435,7 +461,7 @@ export default function HandTracker() {
                   }
 
                   const nextLvlInfo = getLevelInfo(newScore);
-                  spawnNewPattern(nextLvlInfo.numPoints, canvas.width, canvas.height);
+                  spawnNewPattern(nextLvlInfo.numPoints, canvas.width, canvas.height, nextLvlInfo.numMines);
                   return newScore;
                 });
               }
@@ -483,7 +509,7 @@ export default function HandTracker() {
               className="text-[10px] font-black uppercase tracking-widest px-2.5 py-0.5 rounded-full text-black shadow-md"
               style={{ backgroundColor: levelInfo.color }}
             >
-              LVL {levelInfo.level} • {levelInfo.name}
+              LVL {levelInfo.level}/5 • {levelInfo.name}
             </span>
             <p className="text-3xl font-black text-white mt-1 drop-shadow-md">
               {score} <span className="text-xs text-slate-400 font-bold">PTS</span>
@@ -524,8 +550,8 @@ export default function HandTracker() {
         {gameState === 'playing' && (
           <div className="bg-black/60 border border-white/10 backdrop-blur-md px-4 py-1 rounded-full text-center">
             <p className="text-xs font-bold text-slate-200">
-              {levelInfo.numPoints} points • <span className="text-amber-400">+5s toutes les 3 formes</span>
-              {levelInfo.level > 1 && <span className="text-red-400 ml-1.5">(Sans guide)</span>}
+              {levelInfo.numPoints} orbes • <span className="text-amber-400">+5s / 3 formes</span>
+              {!levelInfo.showGuide && <span className="text-red-400 ml-1.5">(Guide désactivé)</span>}
             </p>
           </div>
         )}
@@ -543,30 +569,30 @@ export default function HandTracker() {
         <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-xl flex flex-col items-center justify-center p-6 text-center z-30 space-y-6">
           <div className="max-w-sm space-y-4">
             <div className="inline-block bg-amber-500/20 text-amber-400 border border-amber-500/30 px-3 py-1 rounded-full text-xs font-black uppercase tracking-widest">
-              Comment jouer ?
+              Règles du Jeu
             </div>
 
-            <h2 className="text-3xl font-black text-white">Règles Rapides ⚡</h2>
+            <h2 className="text-3xl font-black text-white">Hyper Tracer ⚡</h2>
 
             <div className="space-y-3 text-left">
               <div className="flex items-center space-x-3 bg-white/5 p-3 rounded-xl border border-white/10">
                 <span className="text-2xl">☝️</span>
                 <p className="text-xs text-slate-200">
-                  Relie les points numérotés <b>dans l'ordre (1 ➔ 2 ➔ 3)</b> avec ton index.
+                  Relie les orbes numérotées <b>(1 ➔ 2 ➔ 3...)</b> avec ton index.
                 </p>
               </div>
 
               <div className="flex items-center space-x-3 bg-white/5 p-3 rounded-xl border border-white/10">
                 <span className="text-2xl">💣</span>
                 <p className="text-xs text-slate-200">
-                  Esquive impérativement les <b>mines rouges</b> sous peine de perdre une vie !
+                  Évite les <b>mines rouges</b> (placées hors des orbes).
                 </p>
               </div>
 
               <div className="flex items-center space-x-3 bg-white/5 p-3 rounded-xl border border-white/10">
-                <span className="text-2xl">⏱️</span>
+                <span className="text-2xl">🏆</span>
                 <p className="text-xs text-slate-200">
-                  Tu obtiens <b>+5 secondes</b> toutes les 3 formes complétées.
+                  Franchis les <b>5 niveaux</b> : les lignes-guides disparaissent au niveau 3 !
                 </p>
               </div>
             </div>
@@ -575,7 +601,7 @@ export default function HandTracker() {
               onClick={startCameraAndGame}
               className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 text-base uppercase tracking-wider transition-transform active:scale-95"
             >
-              C'est compris ! 🚀
+              C'est parti ! 🚀
             </button>
           </div>
         </div>
@@ -589,7 +615,7 @@ export default function HandTracker() {
             </div>
             <h1 className="text-4xl font-black text-white tracking-tight">HYPER TRACER</h1>
             <p className="text-sm text-slate-300 font-medium leading-relaxed">
-              Pointe ton index vers la caméra et relie les checkpoints en évitant les mines !
+              Vise avec ton index et bats le chrono à travers 5 niveaux de difficulté !
             </p>
 
             {errorMsg && <p className="text-xs font-bold text-red-400">{errorMsg}</p>}
@@ -606,7 +632,7 @@ export default function HandTracker() {
                 onClick={() => setShowTutorial(true)}
                 className="text-xs font-bold text-slate-400 hover:text-white underline tracking-wider uppercase"
               >
-                Revoir le tuto
+                Tutoriel
               </button>
             </div>
           </div>
@@ -616,14 +642,14 @@ export default function HandTracker() {
       {gameState === 'loading' && (
         <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-20 space-y-4">
           <div className="w-12 h-12 border-4 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-xs font-black text-amber-300 tracking-widest uppercase">INITIALISATION CAPTEUR...</p>
+          <p className="text-xs font-black text-amber-300 tracking-widest uppercase">LANCEMENT DE LA CAMÉRA...</p>
         </div>
       )}
 
       {gameState === 'gameover' && (
         <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20 space-y-6">
           <div className="space-y-2">
-            <h2 className="text-3xl font-black text-red-500 uppercase tracking-wider">PARTIE TERMINÉE !</h2>
+            <h2 className="text-3xl font-black text-red-500 uppercase tracking-wider">GAME OVER</h2>
             <p className="text-xs text-slate-400 uppercase font-bold tracking-widest">Score Final</p>
             <p className="text-6xl font-black text-white drop-shadow-lg">{score}</p>
           </div>
