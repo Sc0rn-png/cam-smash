@@ -1,0 +1,9 @@
+{
+  "name": "Smash Game",
+  "short_name": "Smash",
+  "start_url": ".",
+  "display": "fullscreen",
+  "orientation": "portrait",
+  "background_color": "#020617",
+  "theme_color": "#020617"
+}
