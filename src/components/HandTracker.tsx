@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect } from 'react';
+import { useRef, useState, useEffect, useCallback } from 'react';
 import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import { Heart, Play, HelpCircle, SkipForward, ArrowRight, RotateCcw, Smartphone } from 'lucide-react';
 
@@ -12,61 +12,55 @@ function generatePattern(numPoints: number): Point[] {
   const points: Point[] = [];
   const minDist = 0.22;
   let attempts = 0;
-
   while (points.length < numPoints && attempts < 300) {
     attempts++;
     const candidate: Point = {
       x: Number((0.15 + Math.random() * 0.7).toFixed(2)),
       y: Number((0.15 + Math.random() * 0.7).toFixed(2)),
     };
-
     const isFarEnough = points.every((p) => Math.hypot(p.x - candidate.x, p.y - candidate.y) >= minDist);
     if (isFarEnough) points.push(candidate);
   }
-
   if (points.length < numPoints) {
     const grid = [
-      { x: 0.2, y: 0.2 }, { x: 0.8, y: 0.2 }, { x: 0.5, y: 0.5 },
-      { x: 0.2, y: 0.8 }, { x: 0.8, y: 0.8 }, { x: 0.5, y: 0.2 }
+      { x: 0.2, y: 0.2 }, { x: 0.8, y: 0.2 },
+      { x: 0.8, y: 0.8 }, { x: 0.2, y: 0.8 },
+      { x: 0.5, y: 0.5 }, { x: 0.5, y: 0.2 }
     ];
     return grid.slice(0, numPoints);
   }
-
   return points;
 }
 
 const TIME_OVER_QUOTES = [
-  "Le temps s'est écoulé ! Tes réflexes aussi apparemment... ⏳",
-  "Oof. La lenteur incarnée. Même un paresseux sous caféine va plus vite. 🐢",
-  "Tic-tac, c'est fini ! Tu cherchais encore tes doigts ou quoi ? ⏰",
-  "45 secondes pour faire ça ? Ma batterie se vide plus vite que ton score. 🔋"
+  "Le temps s'est écoulé! Tes réflexes aussi apparemment...",
+  "Oof. La lenteur incarnée. Même un paresseux sous caféine va plus vite.",
+  "Tic-tac, c'est fini! Tu cherchais encore tes doigts ou quoi?",
+  "45 secondes pour faire ça ? Ma batterie se vide plus vite que ton score."
 ];
 
 const MINE_QUOTES = [
-  "BOOM ! Félicitations, tu as réussi à toucher le seul truc qui brûle. 🔥",
-  "Attention, ça pique ! La mine n'était PAS un bonus de santé... 💥",
-  "Explosion totale ! Tes doigts sont intacts, mais ton estime de toi a pris un coup. 🤖",
-  "Je t'avais dit de pas toucher aux orbes spiky. La curiosité tue le joueur. 💣"
+  "BOOM! Félicitations, tu as réussi à toucher le seul truc qui brûle.",
+  "Attention, ça pique! La mine n'était PAS un bonus de santé...",
+  "Explosion totale! Tes doigts sont intacts, mais ton estime de toi a pris un coup.",
+  "Je t'avais dit de pas toucher aux orbes spiky. La curiosité tue le joueur."
 ];
 
 const HIGH_SCORE_QUOTES = [
-  "NOUVEAU RECORD ! Bon, c'est pas encore de l'art, mais c'est moins pire. 🏆",
-  "Regardez-moi ça ! Un record ! Ne va pas choper la grosse tête non plus. 😎",
-  "Incroyable. Tu as battu ton propre score. L'univers en demeure stupéfait. ✨",
-  "Record pulvérisé ! Tu commences presque à ressembler à quelqu'un de compétent. ⚡"
+  "NOUVEAU RECORD! Bon, c'est pas encore de l'art, mais c'est moins pire.",
+  "Regardez-moi ça! Un record! Ne va pas choper la grosse tête non plus.",
+  "Incroyable. Tu as battu ton propre score. L'univers en demeure stupéfait.",
+  "Record pulvérisé ! Tu commences presque à ressembler à quelqu'un de compétent."
 ];
 
 export default function HandTracker() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-
   const [currentScreen, setCurrentScreen] = useState<'home' | 'tuto' | 'playing'>('home');
   const [tutoStep, setTutoStep] = useState(1);
-
   const [gameState, setGameState] = useState<'idle' | 'loading' | 'playing' | 'gameover'>('idle');
   const [gameOverReason, setGameOverReason] = useState<'time' | 'mine'>('time');
   const [endQuote, setEndQuote] = useState('');
-
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(0);
   const [timeLeft, setTimeLeft] = useState(45);
@@ -82,7 +76,6 @@ export default function HandTracker() {
   const animationFrameId = useRef<number | null>(null);
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-
   const currentPatternRef = useRef<Point[]>([]);
   const activeCheckpointRef = useRef<number>(0);
   const trailRef = useRef<Point[]>([]);
@@ -96,6 +89,45 @@ export default function HandTracker() {
     gameStateRef.current = state;
     setGameState(state);
   };
+
+  // --- GESTION DU WAKE LOCK (ANTI-VEILLE) ---
+  const requestWakeLock = useCallback(async () => {
+    try {
+      if ('wakeLock' in navigator && (!wakeLockRef.current || wakeLockRef.current.released)) {
+        wakeLockRef.current = await navigator.wakeLock.request('screen');
+      }
+    } catch (err: any) {
+      console.warn(`Wake Lock non disponible : ${err.message}`);
+    }
+  }, []);
+
+  const releaseWakeLock = useCallback(async () => {
+    if (wakeLockRef.current && !wakeLockRef.current.released) {
+      await wakeLockRef.current.release();
+      wakeLockRef.current = null;
+    }
+  }, []);
+
+  // Maintient l'écran allumé quand le jeu est actif + réactive le Wake Lock lors du retour sur l'application
+  useEffect(() => {
+    const handleVisibilityChange = async () => {
+      if (document.visibilityState === 'visible' && gameState === 'playing') {
+        await requestWakeLock();
+      }
+    };
+
+    if (gameState === 'playing') {
+      requestWakeLock();
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    } else {
+      releaseWakeLock();
+    }
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      releaseWakeLock();
+    };
+  }, [gameState, requestWakeLock, releaseWakeLock]);
 
   const stopCameraStream = () => {
     if (streamRef.current) {
@@ -111,25 +143,8 @@ export default function HandTracker() {
     if (currentScore >= 600) return { level: 5, numPoints: 6, name: 'OVERDRIVE', color: '#ec4899', orbColor: '#f43f5e', ptsPerShape: 30, showGuide: false, numMines: 3 };
     if (currentScore >= 420) return { level: 4, numPoints: 5, name: 'MASTER', color: '#a855f7', orbColor: '#c084fc', ptsPerShape: 25, showGuide: false, numMines: 3 };
     if (currentScore >= 260) return { level: 3, numPoints: 5, name: 'EXPERT', color: '#ef4444', orbColor: '#f97316', ptsPerShape: 20, showGuide: false, numMines: 2 };
-    if (currentScore >= 120) return { level: 2, numPoints: 4, name: 'AVANCÉ', color: '#f59e0b', orbColor: '#eab308', ptsPerShape: 15, showGuide: true, numMines: 2 };
+    if (currentScore >= 120) return { level: 2, numPoints: 4, name: 'AVANCE', color: '#f59e0b', orbColor: '#eab308', ptsPerShape: 15, showGuide: true, numMines: 2 };
     return { level: 1, numPoints: 3, name: 'NOVICE', color: '#06b6d4', orbColor: '#38bdf8', ptsPerShape: 10, showGuide: true, numMines: 1 };
-  };
-
-  const requestWakeLock = async () => {
-    try {
-      if ('wakeLock' in navigator && !wakeLockRef.current) {
-        wakeLockRef.current = await navigator.wakeLock.request('screen');
-      }
-    } catch (err) {
-      console.warn('Wake Lock non disponible', err);
-    }
-  };
-
-  const releaseWakeLock = async () => {
-    if (wakeLockRef.current) {
-      await wakeLockRef.current.release();
-      wakeLockRef.current = null;
-    }
   };
 
   const requestFullscreenMode = () => {
@@ -158,7 +173,6 @@ export default function HandTracker() {
       window.removeEventListener('resize', handleResize);
       if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
       stopCameraStream();
-      releaseWakeLock();
     };
   }, []);
 
@@ -178,10 +192,25 @@ export default function HandTracker() {
     return () => clearInterval(timer);
   }, [gameState, timeLeft]);
 
+  const triggerExplosion = (x: number, y: number) => {
+    const colors = ['#fef08a', '#f97316', '#ef4444', '#38bdf8'];
+    for (let i = 0; i < 18; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = Math.random() * 7 + 2;
+      particlesRef.current.push({
+        x, y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        size: Math.random() * 5 + 3,
+        color: colors[Math.floor(Math.random() * colors.length)],
+        alpha: 1.0,
+      });
+    }
+  };
+
   const triggerGameOverImpact = (reason: 'time' | 'mine') => {
     setIsFlashing(true);
     setTimeout(() => setIsFlashing(false), 250);
-
     if (reason === 'mine' && canvasRef.current) {
       const ctx = canvasRef.current.getContext('2d');
       if (ctx) {
@@ -199,7 +228,6 @@ export default function HandTracker() {
     triggerGameOverImpact(reason);
     setGameOverReason(reason);
     setGameStateSync('gameover');
-    releaseWakeLock();
 
     const isNewRecord = scoreRef.current > highScore && scoreRef.current > 0;
     if (isNewRecord) {
@@ -216,45 +244,36 @@ export default function HandTracker() {
 
   const initCameraAndModel = async () => {
     if (streamRef.current && landmarkerRef.current) return true;
-
     setGameStateSync('loading');
     setErrorMsg('');
-
     try {
       stopCameraStream();
-
       if (!landmarkerRef.current) {
         const vision = await FilesetResolver.forVisionTasks(
           'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
         );
         landmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
           baseOptions: {
-            modelAssetPath:
-              'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
             delegate: 'GPU',
           },
           runningMode: 'VIDEO',
           numHands: 1,
         });
       }
-
       if (!videoRef.current) throw new Error("Erreur élément vidéo");
-
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
         audio: false,
       });
       streamRef.current = stream;
-
       const video = videoRef.current;
       video.srcObject = stream;
-
       await new Promise<void>((resolve) => {
         video.onloadedmetadata = () => {
           video.play().then(() => resolve());
         };
       });
-
       return true;
     } catch (err: any) {
       console.error(err);
@@ -262,17 +281,6 @@ export default function HandTracker() {
       setErrorMsg('Accès caméra requis. Vérifie tes permissions.');
       return false;
     }
-  };
-
-  const launchGame = async () => {
-    requestFullscreenMode();
-
-    const isReady = await initCameraAndModel();
-    if (!isReady) return;
-
-    requestWakeLock();
-    setCurrentScreen('playing');
-    startGame();
   };
 
   const zoneToScreen = (pt: Point, width: number, height: number): Point => {
@@ -288,7 +296,6 @@ export default function HandTracker() {
     const newMines: Mine[] = [];
     const minSafetyDist = 110;
     const patternScreenPoints = pattern.map((pt) => zoneToScreen(pt, canvasWidth, canvasHeight));
-
     let attempts = 0;
     while (newMines.length < numMinesCount && attempts < 200) {
       attempts++;
@@ -297,71 +304,13 @@ export default function HandTracker() {
         y: PLAY_ZONE.yMin * canvasHeight + Math.random() * (PLAY_ZONE.yMax - PLAY_ZONE.yMin) * canvasHeight,
         radius: 20,
       };
-
-      const isSafeFromOrbs = patternScreenPoints.every(
-        (orb) => Math.hypot(orb.x - candidate.x, orb.y - candidate.y) >= minSafetyDist
-      );
-
-      const isSafeFromOtherMines = newMines.every(
-        (m) => Math.hypot(m.x - candidate.x, m.y - candidate.y) >= 60
-      );
-
+      const isSafeFromOrbs = patternScreenPoints.every((orb) => Math.hypot(orb.x - candidate.x, orb.y - candidate.y) >= minSafetyDist);
+      const isSafeFromOtherMines = newMines.every((m) => Math.hypot(m.x - candidate.x, m.y - candidate.y) >= 60);
       if (isSafeFromOrbs && isSafeFromOtherMines) {
         newMines.push(candidate);
       }
     }
     minesRef.current = newMines;
-  };
-
-  const drawMine = (ctx: CanvasRenderingContext2D, mine: Mine) => {
-    ctx.save();
-    ctx.translate(mine.x, mine.y);
-
-    const spikes = 8;
-    ctx.fillStyle = '#ef4444';
-    for (let i = 0; i < spikes; i++) {
-      const angle = (i * Math.PI * 2) / spikes;
-      ctx.save();
-      ctx.rotate(angle);
-      ctx.beginPath();
-      ctx.moveTo(0, -mine.radius - 8);
-      ctx.lineTo(-5, -mine.radius + 2);
-      ctx.lineTo(5, -mine.radius + 2);
-      ctx.fill();
-      ctx.restore();
-    }
-
-    ctx.beginPath();
-    ctx.arc(0, 0, mine.radius, 0, Math.PI * 2);
-    ctx.fillStyle = '#09090b';
-    ctx.fill();
-    ctx.strokeStyle = '#ef4444';
-    ctx.lineWidth = 3;
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.arc(0, 0, 5, 0, Math.PI * 2);
-    ctx.fillStyle = '#f87171';
-    ctx.fill();
-
-    ctx.restore();
-  };
-
-  const triggerExplosion = (x: number, y: number) => {
-    const colors = ['#fef08a', '#f97316', '#ef4444', '#38bdf8'];
-    for (let i = 0; i < 18; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const speed = Math.random() * 7 + 2;
-      particlesRef.current.push({
-        x,
-        y,
-        vx: Math.cos(angle) * speed,
-        vy: Math.sin(angle) * speed,
-        size: Math.random() * 5 + 3,
-        color: colors[Math.floor(Math.random() * colors.length)],
-        alpha: 1.0,
-      });
-    }
   };
 
   const spawnNewPattern = (numPoints: number, canvasWidth: number, canvasHeight: number, numMinesCount: number) => {
@@ -379,15 +328,52 @@ export default function HandTracker() {
     shapesCompletedRef.current = 0;
     particlesRef.current = [];
     trailRef.current = [];
-
     const initialLvl = getLevelInfo(0);
     if (canvasRef.current) {
       spawnNewPattern(initialLvl.numPoints, canvasRef.current.width, canvasRef.current.height, initialLvl.numMines);
     }
-
     setGameStateSync('playing');
     if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
     animationFrameId.current = requestAnimationFrame(renderLoop);
+  };
+
+  const launchGame = async () => {
+    requestFullscreenMode();
+    const isReady = await initCameraAndModel();
+    if (!isReady) return;
+    setCurrentScreen('playing');
+    startGame();
+  };
+
+  const drawMine = (ctx: CanvasRenderingContext2D, mine: Mine) => {
+    ctx.save();
+    ctx.translate(mine.x, mine.y);
+    const spikes = 8;
+    ctx.fillStyle = '#ef4444';
+    for (let i = 0; i < spikes; i++) {
+      const angle = (i * Math.PI * 2) / spikes;
+      ctx.save();
+      ctx.rotate(angle);
+      ctx.beginPath();
+      ctx.moveTo(0, -mine.radius - 8);
+      ctx.lineTo(-5, -mine.radius + 2);
+      ctx.lineTo(5, -mine.radius + 2);
+      ctx.fill();
+      ctx.restore();
+    }
+    ctx.beginPath();
+    ctx.arc(0, 0, mine.radius, 0, Math.PI * 2);
+    ctx.fillStyle = '#09090b';
+    ctx.fill();
+    ctx.strokeStyle = '#ef4444';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(0, 0, 5, 0, Math.PI * 2);
+    ctx.fillStyle = '#f87171';
+    ctx.fill();
+    ctx.restore();
   };
 
   const renderLoop = (now: number) => {
@@ -412,7 +398,6 @@ export default function HandTracker() {
       if (now - lastAITimeRef.current > 20) {
         lastAITimeRef.current = now;
         const results = landmarker.detectForVideo(video, now);
-
         if (results.landmarks && results.landmarks[0]) {
           const indexTip = results.landmarks[0][8];
           if (indexTip) {
@@ -454,7 +439,6 @@ export default function HandTracker() {
           ctx.arc(pos.x, pos.y, isCurrent ? 24 : 18, 0, Math.PI * 2);
           ctx.fillStyle = isPassed ? '#22c55e' : isCurrent ? currentLvlInfo.orbColor : 'rgba(30, 41, 59, 0.9)';
           ctx.fill();
-
           ctx.strokeStyle = isPassed ? '#86efac' : isCurrent ? '#ffffff' : '#64748b';
           ctx.lineWidth = isCurrent ? 3 : 2;
           ctx.stroke();
@@ -476,7 +460,6 @@ export default function HandTracker() {
             ctx.save();
             ctx.lineCap = 'round';
             ctx.lineJoin = 'round';
-
             for (let i = 0; i < trailRef.current.length - 1; i++) {
               const p1 = trailRef.current[i];
               const p2 = trailRef.current[i + 1];
@@ -509,22 +492,18 @@ export default function HandTracker() {
           for (let i = minesRef.current.length - 1; i >= 0; i--) {
             const mine = minesRef.current[i];
             const distToMine = Math.hypot(finger.x - mine.x, finger.y - mine.y);
-
             if (distToMine < mine.radius + 12) {
               setIsFlashing(true);
               setTimeout(() => setIsFlashing(false), 150);
-
               setLives((prevLives) => {
                 const newLives = prevLives - 1;
                 setDamagedHeartIndex(newLives);
                 setTimeout(() => setDamagedHeartIndex(null), 500);
-
                 if (newLives <= 0) {
                   handleGameOver('mine');
                 }
                 return newLives;
               });
-
               minesRef.current.splice(i, 1);
             }
           }
@@ -533,38 +512,32 @@ export default function HandTracker() {
           if (targetPt) {
             const targetPos = zoneToScreen(targetPt, canvas.width, canvas.height);
             const dist = Math.hypot(finger.x - targetPos.x, finger.y - targetPos.y);
-
             if (dist < 28) {
               triggerExplosion(targetPos.x, targetPos.y);
               activeCheckpointRef.current += 1;
 
               if (activeCheckpointRef.current >= pattern.length) {
                 shapesCompletedRef.current += 1;
-
                 setScore((prevScore) => {
                   const newScore = prevScore + currentLvlInfo.ptsPerShape;
                   scoreRef.current = newScore;
-
                   if (newScore > highScore) {
                     setHighScore(newScore);
                     localStorage.setItem('hyper_tracer_high_score', newScore.toString());
                   }
 
                   const nextLvlInfo = getLevelInfo(newScore);
-
-                  // GESTION DYNAMIQUE DU BONUS DE TEMPS
                   let shapesNeeded = 3;
                   let bonusAmount = 5;
 
                   if (nextLvlInfo.level >= 5) {
-                    shapesNeeded = 2; // Tous les 2 formes validées au niveau 5
-                    bonusAmount = 8;  // +8 secondes
+                    shapesNeeded = 2;
+                    bonusAmount = 8;
                   } else if (nextLvlInfo.level === 4) {
-                    shapesNeeded = 3; // Tous les 3 formes validées au niveau 4
-                    bonusAmount = 8;  // +8 secondes
+                    shapesNeeded = 3;
+                    bonusAmount = 8;
                   }
 
-                  // Application du bonus
                   if (shapesCompletedRef.current % shapesNeeded === 0) {
                     setTimeLeft((t) => t + bonusAmount);
                     setBonusNotification(`+${bonusAmount}s`);
@@ -585,7 +558,6 @@ export default function HandTracker() {
           p.x += p.vx;
           p.y += p.vy;
           p.alpha -= 0.03;
-
           if (p.alpha <= 0) return false;
 
           ctx.save();
@@ -612,7 +584,9 @@ export default function HandTracker() {
       <video ref={videoRef} className="hidden" playsInline autoPlay muted />
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-cover" />
 
-      {isFlashing && <div className="absolute inset-0 bg-white z-50 pointer-events-none transition-opacity duration-150" />}
+      {isFlashing && (
+        <div className="absolute inset-0 bg-white z-50 pointer-events-none transition-opacity duration-150" />
+      )}
 
       {/* PAGE D'ACCUEIL */}
       {currentScreen === 'home' && (
@@ -645,10 +619,7 @@ export default function HandTracker() {
             )}
 
             <button
-              onClick={() => {
-                requestFullscreenMode();
-                launchGame();
-              }}
+              onClick={() => launchGame()}
               className="w-full py-4 bg-gradient-to-r from-amber-500 via-orange-500 to-red-500 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/25 active:scale-95 transition-transform flex items-center justify-center gap-2 text-lg uppercase tracking-wider"
             >
               <Play className="w-5 h-5 fill-slate-950" /> JOUER DIRECT
@@ -679,11 +650,8 @@ export default function HandTracker() {
               Étape {tutoStep} / 4
             </span>
             <button
-              onClick={() => {
-                requestFullscreenMode();
-                launchGame();
-              }}
-              className="flex items-center gap-1 text-xs font-bold text-slate-400 hover:text-white px-3 py-1.5 rounded-full bg-slate-900 border border-white/10 active:scale-95"
+              onClick={() => launchGame()}
+              className="flex items-center gap-1 text-xs font-bold py-1.5 rounded-full bg-slate-900 text-slate-400 hover:text-white px-3 border border-white/10 active:scale-95"
             >
               Skip <SkipForward className="w-3 h-3" />
             </button>
@@ -721,7 +689,7 @@ export default function HandTracker() {
                 </h2>
                 <p className="text-xs text-slate-300 font-medium leading-relaxed">
                   Lève ton <span className="text-amber-400 font-bold">index</span> vers la caméra.<br />
-                  Si tu étais un artiste,<br />
+                  Si tu étais un artiste, <br />
                   ce serait ta plume numérique.
                 </p>
               </div>
@@ -730,20 +698,15 @@ export default function HandTracker() {
             {tutoStep === 3 && (
               <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
                 <div className="flex gap-4 mx-auto justify-center items-center h-20">
-                  {/* Orbe validée */}
                   <div className="relative">
                     <div className="w-[36px] h-[36px] rounded-full bg-[#22c55e] border-2 border-[#86efac] flex items-center justify-center shadow-lg z-10 relative">
                       <span className="text-white text-[13px] font-bold">1</span>
                     </div>
-                    <div className="absolute w-8 h-1 bg-[rgba(255,255,255,0.2)] -right-6 top-1/2 -translate-y-1/2 border-y border-dashed border-transparent" style={{ borderTopColor: 'rgba(255,255,255,0.2)' }} />
                   </div>
-                  {/* Orbe active */}
                   <div className="w-[48px] h-[48px] rounded-full bg-[#38bdf8] border-[3px] border-white flex items-center justify-center shadow-[0_0_15px_#38bdf8] z-20">
                     <span className="text-white text-base font-bold">2</span>
                   </div>
-                  {/* Orbe en attente */}
                   <div className="relative">
-                    <div className="absolute w-8 h-1 bg-[rgba(255,255,255,0.2)] -left-6 top-1/2 -translate-y-1/2 border-y border-dashed border-transparent" style={{ borderTopColor: 'rgba(255,255,255,0.2)' }} />
                     <div className="w-[36px] h-[36px] rounded-full bg-[rgba(30,41,59,0.9)] border-2 border-[#64748b] flex items-center justify-center shadow-lg z-10 relative">
                       <span className="text-white text-[13px] font-bold">3</span>
                     </div>
@@ -774,11 +737,11 @@ export default function HandTracker() {
                   </svg>
                 </div>
                 <h2 className="text-xl font-black text-red-500 uppercase tracking-wide">
-                  Attention aux Pièges !
+                  Attention aux Pièges!
                 </h2>
                 <p className="text-xs text-slate-300 font-medium leading-relaxed">
                   Certaines orbes sont... <span className="text-red-400 font-bold">différentes</span>.<br />
-                  Ne touche surtout pas aux mines spiky,<br />
+                  Ne touche surtout pas aux mines spiky, <br />
                   sinon c'est l'explosion immédiate !
                 </p>
               </div>
@@ -791,17 +754,14 @@ export default function HandTracker() {
                 onClick={() => setTutoStep((prev) => prev + 1)}
                 className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/20 active:scale-95 transition-transform flex items-center justify-center gap-2 text-sm uppercase tracking-wider"
               >
-                Compris ! <ArrowRight className="w-4 h-4" />
+                Compris! <ArrowRight className="w-4 h-4" />
               </button>
             ) : (
               <button
-                onClick={() => {
-                  requestFullscreenMode();
-                  launchGame();
-                }}
+                onClick={() => launchGame()}
                 className="w-full py-4 bg-gradient-to-r from-emerald-400 to-teal-500 text-slate-950 font-black rounded-2xl shadow-xl shadow-emerald-500/30 active:scale-95 transition-transform flex items-center justify-center gap-2 text-base uppercase tracking-wider animate-bounce"
               >
-                C'est parti ! 🚀
+                C'est parti !
               </button>
             )}
           </div>
@@ -809,7 +769,7 @@ export default function HandTracker() {
       )}
 
       {/* INTERFACE EN JEU */}
-      {currentScreen === 'playing' && (
+      {currentScreen === 'playing' && gameState !== 'gameover' && (
         <div className="absolute top-0 left-0 right-0 p-4 pt-6 flex flex-col items-center z-10 bg-gradient-to-b from-black/90 via-black/40 to-transparent pointer-events-none space-y-2">
           <div className="flex justify-between items-center w-full max-w-md px-2">
             <div className="flex flex-col items-start">
@@ -817,7 +777,7 @@ export default function HandTracker() {
                 className="text-[10px] font-black uppercase tracking-widest px-2.5 py-0.5 rounded-full text-black shadow-md"
                 style={{ backgroundColor: levelInfo.color }}
               >
-                LVL {levelInfo.level}/5 • {levelInfo.name}
+                LVL {levelInfo.level}/5 {levelInfo.name}
               </span>
               <p className="text-3xl font-black text-white mt-1 drop-shadow-md">
                 {score} <span className="text-xs text-slate-400 font-bold">PTS</span>
@@ -840,7 +800,6 @@ export default function HandTracker() {
               {[0, 1, 2].map((index) => {
                 const isAlive = index < lives;
                 const isExploding = damagedHeartIndex === index;
-
                 return (
                   <Heart
                     key={index}
