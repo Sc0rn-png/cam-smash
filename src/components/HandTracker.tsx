@@ -101,14 +101,13 @@ export default function HandTracker() {
     };
   };
 
-  // Empêcher la mise en veille du téléphone
   const requestWakeLock = async () => {
     try {
       if ('wakeLock' in navigator && !wakeLockRef.current) {
         wakeLockRef.current = await navigator.wakeLock.request('screen');
       }
     } catch (err) {
-      console.warn('Screen Wake Lock indisponible :', err);
+      console.warn('Wake Lock non supporté', err);
     }
   };
 
@@ -116,6 +115,15 @@ export default function HandTracker() {
     if (wakeLockRef.current) {
       await wakeLockRef.current.release();
       wakeLockRef.current = null;
+    }
+  };
+
+  const enterFullscreen = () => {
+    const doc = document.documentElement as any;
+    if (doc.requestFullscreen) {
+      doc.requestFullscreen().catch(() => {});
+    } else if (doc.webkitRequestFullscreen) {
+      doc.webkitRequestFullscreen().catch(() => {});
     }
   };
 
@@ -135,16 +143,8 @@ export default function HandTracker() {
     handleResize();
     window.addEventListener('resize', handleResize);
 
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible' && gameStateRef.current === 'playing') {
-        requestWakeLock();
-      }
-    };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
     return () => {
       window.removeEventListener('resize', handleResize);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
       if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
       releaseWakeLock();
     };
@@ -167,20 +167,8 @@ export default function HandTracker() {
     return () => clearInterval(timer);
   }, [gameState, timeLeft]);
 
-  // Forcer le plein écran (doit être synchrone au clic)
-  const forceFullscreen = () => {
-    const docEl = document.documentElement as HTMLElement & {
-      webkitRequestFullscreen?: () => Promise<void>;
-    };
-    if (docEl.requestFullscreen) {
-      docEl.requestFullscreen().catch(() => {});
-    } else if (docEl.webkitRequestFullscreen) {
-      docEl.webkitRequestFullscreen().catch(() => {});
-    }
-  };
-
-  const handleUserLaunch = () => {
-    forceFullscreen();
+  const handleLaunchGame = () => {
+    enterFullscreen();
     requestWakeLock();
     startCameraAndGame();
   };
@@ -638,7 +626,7 @@ export default function HandTracker() {
             </div>
 
             <button
-              onClick={handleUserLaunch}
+              onClick={handleLaunchGame}
               className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 text-base uppercase tracking-wider transition-transform active:scale-95"
             >
               C'est parti ! 🚀
@@ -662,7 +650,7 @@ export default function HandTracker() {
 
             <div className="space-y-3">
               <button
-                onClick={handleUserLaunch}
+                onClick={handleLaunchGame}
                 className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 transition-transform active:scale-95 text-lg uppercase tracking-wider"
               >
                 Jouer 🚀
@@ -702,7 +690,7 @@ export default function HandTracker() {
 
           <button
             onClick={() => {
-              forceFullscreen();
+              enterFullscreen();
               requestWakeLock();
               startGame();
             }}
