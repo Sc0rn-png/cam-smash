@@ -2,33 +2,11 @@ import { useRef, useState, useEffect } from 'react';
 import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import { Heart, Maximize2 } from 'lucide-react';
 
-interface Point {
-  x: number;
-  y: number;
-}
+interface Point { x: number; y: number; }
+interface Mine { x: number; y: number; radius: number; }
+interface Particle { x: number; y: number; vx: number; vy: number; size: number; color: string; alpha: number; }
 
-interface Mine {
-  x: number;
-  y: number;
-  radius: number;
-}
-
-interface Particle {
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  size: number;
-  color: string;
-  alpha: number;
-}
-
-const PLAY_ZONE = {
-  xMin: 0.1,
-  xMax: 0.9,
-  yMin: 0.2,
-  yMax: 0.8,
-};
+const PLAY_ZONE = { xMin: 0.1, xMax: 0.9, yMin: 0.2, yMax: 0.8 };
 
 function generatePattern(numPoints: number): Point[] {
   const points: Point[] = [];
@@ -59,7 +37,6 @@ export default function HandTracker() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
-  // États de jeu
   const [gameState, setGameState] = useState<'idle' | 'loading' | 'playing' | 'gameover'>('idle');
   const [showTutorial, setShowTutorial] = useState(false);
   const [score, setScore] = useState(0);
@@ -71,11 +48,11 @@ export default function HandTracker() {
   const [isFlashing, setIsFlashing] = useState(false);
   const [damagedHeartIndex, setDamagedHeartIndex] = useState<number | null>(null);
 
-  // Refs de boucle
+  // Refs de synchronisation
   const gameStateRef = useRef(gameState);
+  const scoreRef = useRef(0); // FIX: Référence pour éviter la stale closure
   const landmarkerRef = useRef<HandLandmarker | null>(null);
   const animationFrameId = useRef<number | null>(null);
-  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
 
   const currentPatternRef = useRef<Point[]>([]);
   const activeCheckpointRef = useRef<number>(0);
@@ -112,10 +89,13 @@ export default function HandTracker() {
     };
     handleResize();
     window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
+    };
   }, []);
 
-  // Chronomètre principal (45 secondes de départ)
   useEffect(() => {
     let timer: NodeJS.Timeout;
     if (gameState === 'playing' && timeLeft > 0) {
@@ -158,7 +138,7 @@ export default function HandTracker() {
 
   const spawnMines = (canvasWidth: number, canvasHeight: number) => {
     const newMines: Mine[] = [];
-    const numMines = Math.floor(Math.random() * 2) + 1; // 1 ou 2 mines par forme
+    const numMines = Math.floor(Math.random() * 2) + 1;
 
     for (let i = 0; i < numMines; i++) {
       newMines.push({
@@ -174,7 +154,6 @@ export default function HandTracker() {
     ctx.save();
     ctx.translate(mine.x, mine.y);
 
-    // Piques rouges néon
     const spikes = 8;
     ctx.fillStyle = '#ef4444';
     for (let i = 0; i < spikes; i++) {
@@ -189,7 +168,6 @@ export default function HandTracker() {
       ctx.restore();
     }
 
-    // Corps de la mine
     ctx.beginPath();
     ctx.arc(0, 0, mine.radius, 0, Math.PI * 2);
     ctx.fillStyle = '#09090b';
@@ -198,7 +176,6 @@ export default function HandTracker() {
     ctx.lineWidth = 3;
     ctx.stroke();
 
-    // Cœur central clignotant
     ctx.beginPath();
     ctx.arc(0, 0, 5, 0, Math.PI * 2);
     ctx.fillStyle = '#f87171';
@@ -274,6 +251,7 @@ export default function HandTracker() {
 
   const startGame = () => {
     setScore(0);
+    scoreRef.current = 0; // FIX: Synchronisation de la ref
     setTimeLeft(45);
     setLives(3);
     shapesCompletedRef.current = 0;
@@ -299,18 +277,15 @@ export default function HandTracker() {
     if (!ctx) return;
 
     if (video.readyState >= 2) {
-      // Miroir vidéo
       ctx.save();
       ctx.translate(canvas.width, 0);
       ctx.scale(-1, 1);
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       ctx.restore();
 
-      // Voile sombre
       ctx.fillStyle = 'rgba(15, 23, 42, 0.70)';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // Traitement IA (Mémoire / FPS optimisé)
       if (now - lastAITimeRef.current > 20) {
         lastAITimeRef.current = now;
         const results = landmarker.detectForVideo(video, now);
@@ -331,9 +306,9 @@ export default function HandTracker() {
 
       if (gameStateRef.current === 'playing') {
         const pattern = currentPatternRef.current;
-        const currentLvlInfo = getLevelInfo(score);
+        // FIX: On lit la ref au lieu du state figé
+        const currentLvlInfo = getLevelInfo(scoreRef.current);
 
-        // 1. LIGNES GUIDE (Niveau 1 uniquement)
         if (pattern.length > 0 && currentLvlInfo.level === 1) {
           ctx.beginPath();
           pattern.forEach((pt, idx) => {
@@ -348,7 +323,6 @@ export default function HandTracker() {
           ctx.setLineDash([]);
         }
 
-        // 2. CHECKPOINTS NUMÉROTÉS
         pattern.forEach((pt, idx) => {
           const pos = zoneToScreen(pt, canvas.width, canvas.height);
           const isCurrent = idx === activeCheckpointRef.current;
@@ -370,10 +344,8 @@ export default function HandTracker() {
           ctx.fillText(String(idx + 1), pos.x, pos.y);
         });
 
-        // 3. DESSIN DES MINES
         minesRef.current.forEach((mine) => drawMine(ctx, mine));
 
-        // 4. TRAÎNÉE FLAMME & DÉTECTIONS
         if (finger) {
           trailRef.current.push({ x: finger.x, y: finger.y });
           if (trailRef.current.length > 25) trailRef.current.shift();
@@ -388,7 +360,6 @@ export default function HandTracker() {
               const p2 = trailRef.current[i + 1];
               const ratio = i / trailRef.current.length;
 
-              // Couche 1: Halo Rouge
               ctx.beginPath();
               ctx.moveTo(p1.x, p1.y);
               ctx.lineTo(p2.x, p2.y);
@@ -396,7 +367,6 @@ export default function HandTracker() {
               ctx.lineWidth = ratio * 32;
               ctx.stroke();
 
-              // Couche 2: Corps Orange
               ctx.beginPath();
               ctx.moveTo(p1.x, p1.y);
               ctx.lineTo(p2.x, p2.y);
@@ -404,7 +374,6 @@ export default function HandTracker() {
               ctx.lineWidth = ratio * 16;
               ctx.stroke();
 
-              // Couche 3: Cœur Jaune/Blanc
               ctx.beginPath();
               ctx.moveTo(p1.x, p1.y);
               ctx.lineTo(p2.x, p2.y);
@@ -415,7 +384,6 @@ export default function HandTracker() {
             ctx.restore();
           }
 
-          // A. COLLISION AVEC LES MINES (DÉGÂTS / FLASH / VIES)
           for (let i = minesRef.current.length - 1; i >= 0; i--) {
             const mine = minesRef.current[i];
             const distToMine = Math.hypot(finger.x - mine.x, finger.y - mine.y);
@@ -439,7 +407,6 @@ export default function HandTracker() {
             }
           }
 
-          // B. VALIDATION STRICTE DU POINT (28px max)
           const targetPt = pattern[activeCheckpointRef.current];
           if (targetPt) {
             const targetPos = zoneToScreen(targetPt, canvas.width, canvas.height);
@@ -449,18 +416,18 @@ export default function HandTracker() {
               triggerExplosion(targetPos.x, targetPos.y);
               activeCheckpointRef.current += 1;
 
-              // Forme terminée
               if (activeCheckpointRef.current >= pattern.length) {
                 shapesCompletedRef.current += 1;
 
                 setScore((prevScore) => {
                   const newScore = prevScore + currentLvlInfo.ptsPerShape;
+                  scoreRef.current = newScore; // FIX: Mettre à jour la ref immédiatement
+
                   if (newScore > highScore) {
                     setHighScore(newScore);
                     localStorage.setItem('hyper_tracer_high_score', newScore.toString());
                   }
 
-                  // BONUS TEMPS SEULEMENT TOUTES LES 3 FORMES
                   if (shapesCompletedRef.current % 3 === 0) {
                     setTimeLeft((t) => t + 5);
                     setBonusNotification('+5s');
@@ -478,7 +445,6 @@ export default function HandTracker() {
           if (trailRef.current.length > 0) trailRef.current.shift();
         }
 
-        // 5. ANIMATION DES PARTICULES
         particlesRef.current = particlesRef.current.filter((p) => {
           p.x += p.vx;
           p.y += p.vy;
@@ -508,13 +474,10 @@ export default function HandTracker() {
       <video ref={videoRef} className="hidden" playsInline autoPlay muted />
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-cover" />
 
-      {/* FLASH NOIR EN CAS D'IMPACT DE MINE */}
       {isFlashing && <div className="absolute inset-0 bg-black z-50 pointer-events-none" />}
 
-      {/* HUD Supérieur */}
       <div className="absolute top-0 left-0 right-0 p-4 pt-6 flex flex-col items-center z-10 bg-gradient-to-b from-black/90 via-black/40 to-transparent pointer-events-none space-y-2">
         <div className="flex justify-between items-center w-full max-w-md px-2">
-          {/* Badge Niveau */}
           <div className="flex flex-col items-start">
             <span
               className="text-[10px] font-black uppercase tracking-widest px-2.5 py-0.5 rounded-full text-black shadow-md"
@@ -527,7 +490,6 @@ export default function HandTracker() {
             </p>
           </div>
 
-          {/* Chrono */}
           <div className="relative flex flex-col items-center">
             <span className="text-[10px] text-slate-300 font-extrabold uppercase tracking-widest">CHRONO</span>
             <p className={`text-4xl font-black transition-transform ${timeLeft <= 10 ? 'text-red-500 animate-ping' : 'text-amber-400'}`}>
@@ -540,7 +502,6 @@ export default function HandTracker() {
             )}
           </div>
 
-          {/* CŒURS / VIES (HAUT À DROITE) */}
           <div className="flex items-center gap-1.5 bg-black/50 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/10">
             {[0, 1, 2].map((index) => {
               const isAlive = index < lives;
@@ -570,7 +531,6 @@ export default function HandTracker() {
         )}
       </div>
 
-      {/* BOUTON PLEIN ÉCRAN */}
       <button
         onClick={toggleFullscreen}
         className="absolute bottom-4 right-4 z-30 bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white p-3 rounded-2xl border border-white/10 backdrop-blur transition active:scale-95 shadow-lg"
@@ -579,7 +539,6 @@ export default function HandTracker() {
         <Maximize2 className="w-5 h-5" />
       </button>
 
-      {/* MODAL TUTORIEL (1ère visite) */}
       {showTutorial && (
         <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-xl flex flex-col items-center justify-center p-6 text-center z-30 space-y-6">
           <div className="max-w-sm space-y-4">
@@ -622,7 +581,6 @@ export default function HandTracker() {
         </div>
       )}
 
-      {/* ÉCRAN D'ACCUEIL */}
       {gameState === 'idle' && !showTutorial && (
         <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-lg flex flex-col items-center justify-center p-6 text-center z-20">
           <div className="max-w-xs space-y-6">
@@ -655,7 +613,6 @@ export default function HandTracker() {
         </div>
       )}
 
-      {/* CHARGEMENT */}
       {gameState === 'loading' && (
         <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-20 space-y-4">
           <div className="w-12 h-12 border-4 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
@@ -663,7 +620,6 @@ export default function HandTracker() {
         </div>
       )}
 
-      {/* GAME OVER */}
       {gameState === 'gameover' && (
         <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20 space-y-6">
           <div className="space-y-2">
