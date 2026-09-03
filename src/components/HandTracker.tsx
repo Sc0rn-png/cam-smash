@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect } from 'react';
 import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
-import { Heart, RefreshCw } from 'lucide-react';
+import { Heart, Play, HelpCircle, SkipForward, ArrowRight, RotateCcw } from 'lucide-react';
 
 interface Point { x: number; y: number; }
 interface Mine { x: number; y: number; radius: number; }
@@ -35,13 +35,39 @@ function generatePattern(numPoints: number): Point[] {
   return points;
 }
 
+// Phrases sarcastiques & cyniques style Claptrap
+const TIME_OVER_QUOTES = [
+  "Le temps s'est écoulé ! Tes réflexes aussi apparemment... ⏳",
+  "Oof. La lenteur incarnée. Même un paresseux sous caféine va plus vite. 🐢",
+  "Tic-tac, c'est fini ! Tu cherchais encore tes doigts ou quoi ? ⏰",
+  "45 secondes pour faire ça ? Ma batterie se vide plus vite que ton score. 🔋"
+];
+
+const MINE_QUOTES = [
+  "BOOM ! Félicitations, tu as réussi à toucher le seul truc qui brûle. 🔥",
+  "Attention, ça pique ! La mine n'était PAS un bonus de santé... 💥",
+  "Explosion totale ! Tes doigts sont intacts, mais ton estime de toi a pris un coup. 🤖",
+  "Je t'avais dit de pas toucher aux orbes spiky. La curiosité tue le joueur. 💣"
+];
+
+const HIGH_SCORE_QUOTES = [
+  "NOUVEAU RECORD ! Bon, c'est pas encore de l'art, mais c'est moins pire. 🏆",
+  "Regardez-moi ça ! Un record ! Ne va pas choper la grosse tête non plus. 😎",
+  "Incroyable. Tu as battu ton propre score. L'univers en demeure stupéfait. ✨",
+  "Record pulvérisé ! Tu commences presque à ressembler à quelqu'un de compétent. ⚡"
+];
+
 export default function HandTracker() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  const [step, setStep] = useState<'init' | 'ready' | 'playing'>('init');
+  // Nav: 'home' | 'tuto' | 'playing'
+  const [currentScreen, setCurrentScreen] = useState<'home' | 'tuto' | 'playing'>('home');
+  const [tutoStep, setTutoStep] = useState(1);
+
   const [gameState, setGameState] = useState<'idle' | 'loading' | 'playing' | 'gameover'>('idle');
-  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
+  const [gameOverReason, setGameOverReason] = useState<'time' | 'mine'>('time');
+  const [endQuote, setEndQuote] = useState('');
 
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(0);
@@ -97,7 +123,7 @@ export default function HandTracker() {
         wakeLockRef.current = await navigator.wakeLock.request('screen');
       }
     } catch (err) {
-      console.warn('Wake Lock non supporté', err);
+      console.warn('Wake Lock non disponible', err);
     }
   };
 
@@ -135,8 +161,7 @@ export default function HandTracker() {
       timer = setInterval(() => {
         setTimeLeft((prev) => {
           if (prev <= 1) {
-            setGameStateSync('gameover');
-            releaseWakeLock();
+            handleGameOver('time');
             return 0;
           }
           return prev - 1;
@@ -146,15 +171,31 @@ export default function HandTracker() {
     return () => clearInterval(timer);
   }, [gameState, timeLeft]);
 
-  // Initialisation ultra-sécurisée de la caméra
-  const handleInitCamera = async (overrideFacingMode?: 'user' | 'environment') => {
+  const handleGameOver = (reason: 'time' | 'mine') => {
+    setGameOverReason(reason);
+    setGameStateSync('gameover');
+    releaseWakeLock();
+
+    const isNewRecord = scoreRef.current > highScore && scoreRef.current > 0;
+    if (isNewRecord) {
+      const q = HIGH_SCORE_QUOTES[Math.floor(Math.random() * HIGH_SCORE_QUOTES.length)];
+      setEndQuote(q);
+    } else if (reason === 'mine') {
+      const q = MINE_QUOTES[Math.floor(Math.random() * MINE_QUOTES.length)];
+      setEndQuote(q);
+    } else {
+      const q = TIME_OVER_QUOTES[Math.floor(Math.random() * TIME_OVER_QUOTES.length)];
+      setEndQuote(q);
+    }
+  };
+
+  const initCameraAndModel = async () => {
+    if (streamRef.current && landmarkerRef.current) return true;
+
     setGameStateSync('loading');
     setErrorMsg('');
 
-    const targetMode = overrideFacingMode || facingMode;
-
     try {
-      // Nettoyer les flux résiduels
       stopCameraStream();
 
       if (!landmarkerRef.current) {
@@ -172,18 +213,12 @@ export default function HandTracker() {
         });
       }
 
-      if (!videoRef.current) throw new Error("Élément vidéo introuvable");
+      if (!videoRef.current) throw new Error("Erreur élément vidéo");
 
-      const constraints: MediaStreamConstraints = {
-        video: {
-          facingMode: targetMode,
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-        },
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
         audio: false,
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      });
       streamRef.current = stream;
 
       const video = videoRef.current;
@@ -195,37 +230,26 @@ export default function HandTracker() {
         };
       });
 
-      setStep('ready');
-      setGameStateSync('idle');
+      return true;
     } catch (err: any) {
-      console.error("Erreur d'accès vidéo:", err);
+      console.error(err);
       setGameStateSync('idle');
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setErrorMsg('Accès caméra refusé. Autorise-le dans les paramètres de ton navigateur.');
-      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-        setErrorMsg('Aucune caméra détectée sur cet appareil.');
-      } else {
-        setErrorMsg(`Erreur vidéo : ${err.message || 'Impossible de lancer la caméra'}`);
-      }
+      setErrorMsg('Accès caméra requis. Vérifie tes permissions.');
+      return false;
     }
   };
 
-  const toggleCamera = () => {
-    const nextMode = facingMode === 'user' ? 'environment' : 'user';
-    setFacingMode(nextMode);
-    handleInitCamera(nextMode);
-  };
+  const launchGame = async () => {
+    const isReady = await initCameraAndModel();
+    if (!isReady) return;
 
-  const handleStartFullscreenGame = () => {
+    // Plein écran sur geste direct
     const doc = document.documentElement as any;
-    if (doc.requestFullscreen) {
-      doc.requestFullscreen().catch(() => {});
-    } else if (doc.webkitRequestFullscreen) {
-      doc.webkitRequestFullscreen().catch(() => {});
-    }
+    if (doc.requestFullscreen) doc.requestFullscreen().catch(() => {});
+    else if (doc.webkitRequestFullscreen) doc.webkitRequestFullscreen().catch(() => {});
 
     requestWakeLock();
-    setStep('playing');
+    setCurrentScreen('playing');
     startGame();
   };
 
@@ -355,10 +379,8 @@ export default function HandTracker() {
 
     if (video.readyState >= 2) {
       ctx.save();
-      if (facingMode === 'user') {
-        ctx.translate(canvas.width, 0);
-        ctx.scale(-1, 1);
-      }
+      ctx.translate(canvas.width, 0);
+      ctx.scale(-1, 1);
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       ctx.restore();
 
@@ -372,7 +394,7 @@ export default function HandTracker() {
         if (results.landmarks && results.landmarks[0]) {
           const indexTip = results.landmarks[0][8];
           if (indexTip) {
-            const rawX = facingMode === 'user' ? (1 - indexTip.x) * canvas.width : indexTip.x * canvas.width;
+            const rawX = (1 - indexTip.x) * canvas.width;
             const rawY = indexTip.y * canvas.height;
             fingerPosRef.current = { x: rawX, y: rawY };
           }
@@ -476,8 +498,7 @@ export default function HandTracker() {
                 setTimeout(() => setDamagedHeartIndex(null), 500);
 
                 if (newLives <= 0) {
-                  setGameStateSync('gameover');
-                  releaseWakeLock();
+                  handleGameOver('mine');
                 }
                 return newLives;
               });
@@ -552,19 +573,171 @@ export default function HandTracker() {
 
   return (
     <div className="fixed inset-0 w-screen h-screen bg-slate-950 overflow-hidden select-none font-sans">
-      {/* Élément vidéo configuré avec playsInline et muted pour contourner le blocage autoplay mobile */}
-      <video
-        ref={videoRef}
-        className="hidden"
-        playsInline
-        autoPlay
-        muted
-      />
+      <video ref={videoRef} className="hidden" playsInline autoPlay muted />
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-cover" />
 
       {isFlashing && <div className="absolute inset-0 bg-black z-50 pointer-events-none" />}
 
-      {step === 'playing' && (
+      {/* PAGE D'ACCUEIL */}
+      {currentScreen === 'home' && (
+        <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-xl flex flex-col justify-between p-6 z-40 text-center">
+          <div className="pt-10 space-y-3">
+            <span className="text-[10px] font-black uppercase tracking-[0.3em] px-3 py-1 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">
+              Motion Tracking Arcade
+            </span>
+            <h1 className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-400 via-orange-500 to-red-500 tracking-tight uppercase drop-shadow-sm">
+              HYPER TRACER
+            </h1>
+            <p className="text-sm font-semibold text-slate-300 leading-snug max-w-xs mx-auto">
+              Tes doigts sont tes pinceaux.<br />
+              Le vide est ton terrain de jeu.
+            </p>
+          </div>
+
+          <div className="my-auto space-y-4 max-w-xs mx-auto w-full">
+            {highScore > 0 && (
+              <div className="bg-slate-900/80 border border-white/10 rounded-2xl p-3 shadow-inner">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Meilleur Record</p>
+                <p className="text-2xl font-black text-amber-400">{highScore} <span className="text-xs text-slate-500">PTS</span></p>
+              </div>
+            )}
+
+            {errorMsg && (
+              <div className="bg-red-500/10 border border-red-500/30 p-3 rounded-xl text-xs font-bold text-red-400">
+                {errorMsg}
+              </div>
+            )}
+
+            <button
+              onClick={launchGame}
+              className="w-full py-4 bg-gradient-to-r from-amber-500 via-orange-500 to-red-500 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/25 active:scale-95 transition-transform flex items-center justify-center gap-2 text-lg uppercase tracking-wider"
+            >
+              <Play className="w-5 h-5 fill-slate-950" /> JOUER DIRECT
+            </button>
+
+            <button
+              onClick={() => {
+                setTutoStep(1);
+                setCurrentScreen('tuto');
+              }}
+              className="w-full py-3.5 bg-slate-900 hover:bg-slate-800 text-slate-300 font-bold rounded-2xl border border-white/10 active:scale-95 transition-transform flex items-center justify-center gap-2 text-sm"
+            >
+              <HelpCircle className="w-4 h-4 text-amber-400" /> Comment jouer ?
+            </button>
+          </div>
+
+          <p className="pb-4 text-[11px] text-slate-500 font-medium">
+            Propulsé par la caméra de ton smartphone
+          </p>
+        </div>
+      )}
+
+      {/* PAGE TUTORIEL (4 ÉTAPES) */}
+      {currentScreen === 'tuto' && (
+        <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-xl flex flex-col justify-between p-6 z-40 text-center">
+          <div className="flex justify-between items-center pt-2">
+            <span className="text-xs font-black text-amber-400 tracking-widest uppercase">
+              Étape {tutoStep} / 4
+            </span>
+            <button
+              onClick={launchGame}
+              className="flex items-center gap-1 text-xs font-bold text-slate-400 hover:text-white px-3 py-1.5 rounded-full bg-slate-900 border border-white/10 active:scale-95"
+            >
+              Skip <SkipForward className="w-3 h-3" />
+            </button>
+          </div>
+
+          <div className="my-auto max-w-xs mx-auto space-y-6">
+            {tutoStep === 1 && (
+              <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
+                <div className="text-5xl bg-slate-900 border border-white/10 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto shadow-xl">
+                  📱
+                </div>
+                <h2 className="text-xl font-black text-white uppercase tracking-wide">
+                  Positionne ton écran
+                </h2>
+                <p className="text-xs text-slate-300 font-medium leading-relaxed">
+                  Pose ton téléphone face à toi<br />
+                  à environ <span className="text-amber-400 font-bold">30 - 40 cm</span>.<br />
+                  <span className="text-slate-500 text-[11px] font-semibold">(Ou tiens-le de l'autre main pour les braves)</span>
+                </p>
+              </div>
+            )}
+
+            {tutoStep === 2 && (
+              <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
+                <div className="text-5xl bg-slate-900 border border-white/10 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto shadow-xl">
+                  ☝️
+                </div>
+                <h2 className="text-xl font-black text-white uppercase tracking-wide">
+                  Prépare ta plume
+                </h2>
+                <p className="text-xs text-slate-300 font-medium leading-relaxed">
+                  Lève ton <span className="text-amber-400 font-bold">index</span> vers la caméra.<br />
+                  Si tu étais un artiste,<br />
+                  ce serait ta plume numérique.
+                </p>
+              </div>
+            )}
+
+            {tutoStep === 3 && (
+              <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
+                <div className="text-5xl bg-slate-900 border border-white/10 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto shadow-xl">
+                  ⚡
+                </div>
+                <h2 className="text-xl font-black text-white uppercase tracking-wide">
+                  Chasse aux orbes
+                </h2>
+                <p className="text-xs text-slate-300 font-medium leading-relaxed">
+                  Relie un maximum d'<span className="text-emerald-400 font-bold">orbes de couleur</span><br />
+                  dans l'ordre indiqué<br />
+                  avant la fin du temps imparti.
+                </p>
+              </div>
+            )}
+
+            {tutoStep === 4 && (
+              <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
+                {/* Représentation visuelle de la mine */}
+                <div className="relative w-20 h-20 mx-auto flex items-center justify-center">
+                  <div className="w-12 h-12 rounded-full bg-slate-950 border-2 border-red-500 flex items-center justify-center shadow-[0_0_20px_rgba(239,68,68,0.5)] animate-pulse">
+                    <div className="w-2.5 h-2.5 rounded-full bg-red-400" />
+                  </div>
+                </div>
+                <h2 className="text-xl font-black text-red-500 uppercase tracking-wide">
+                  Attention aux Pièges !
+                </h2>
+                <p className="text-xs text-slate-300 font-medium leading-relaxed">
+                  Certaines orbes sont... <span className="text-red-400 font-bold">différentes</span>.<br />
+                  Ne touche surtout pas aux mines spiky,<br />
+                  sinon c'est l'explosion immédiate !
+                </p>
+              </div>
+            )}
+          </div>
+
+          <div className="pb-4 max-w-xs mx-auto w-full">
+            {tutoStep < 4 ? (
+              <button
+                onClick={() => setTutoStep((prev) => prev + 1)}
+                className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/20 active:scale-95 transition-transform flex items-center justify-center gap-2 text-sm uppercase tracking-wider"
+              >
+                Compris ! <ArrowRight className="w-4 h-4" />
+              </button>
+            ) : (
+              <button
+                onClick={launchGame}
+                className="w-full py-4 bg-gradient-to-r from-emerald-400 to-teal-500 text-slate-950 font-black rounded-2xl shadow-xl shadow-emerald-500/30 active:scale-95 transition-transform flex items-center justify-center gap-2 text-base uppercase tracking-wider animate-bounce"
+              >
+                C'est parti ! 🚀
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* INTERFACE EN JEU */}
+      {currentScreen === 'playing' && (
         <div className="absolute top-0 left-0 right-0 p-4 pt-6 flex flex-col items-center z-10 bg-gradient-to-b from-black/90 via-black/40 to-transparent pointer-events-none space-y-2">
           <div className="flex justify-between items-center w-full max-w-md px-2">
             <div className="flex flex-col items-start">
@@ -621,95 +794,52 @@ export default function HandTracker() {
         </div>
       )}
 
-      {/* Étape 1 : Initialisation */}
-      {step === 'init' && (
-        <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-lg flex flex-col items-center justify-center p-6 text-center z-20">
-          <div className="max-w-xs space-y-6">
-            <div className="inline-block bg-gradient-to-r from-orange-500 to-amber-400 p-3.5 rounded-2xl shadow-xl shadow-orange-500/20">
-              <span className="text-4xl">📷</span>
-            </div>
-            <h1 className="text-3xl font-black text-white tracking-tight">ACTIVER LA CAMÉRA</h1>
-            <p className="text-xs text-slate-300 font-medium leading-relaxed">
-              Clique ci-dessous pour déclencher l'accès caméra.
-            </p>
-
-            {errorMsg && (
-              <div className="bg-red-500/10 border border-red-500/30 p-3 rounded-xl">
-                <p className="text-xs font-bold text-red-400">{errorMsg}</p>
-              </div>
-            )}
-
-            <button
-              onClick={() => handleInitCamera()}
-              className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 transition-transform active:scale-95 text-base uppercase tracking-wider"
-            >
-              Lancer la Caméra
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Étape 2 : Validation flux vidéo + Plein écran */}
-      {step === 'ready' && (
-        <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-lg flex flex-col items-center justify-center p-6 text-center z-20">
-          <div className="max-w-xs space-y-6">
-            <div className="inline-block bg-gradient-to-r from-emerald-500 to-teal-400 p-3.5 rounded-2xl shadow-xl shadow-emerald-500/20">
-              <span className="text-4xl">📺</span>
-            </div>
-            <h1 className="text-3xl font-black text-white tracking-tight">CAMÉRA DÉTECTÉE !</h1>
-            <p className="text-xs text-slate-300 font-medium leading-relaxed">
-              Passe en plein écran pour commencer à jouer.
-            </p>
-
-            <div className="flex flex-col gap-3">
-              <button
-                onClick={handleStartFullscreenGame}
-                className="w-full py-4 bg-gradient-to-r from-emerald-400 to-teal-500 hover:from-emerald-300 hover:to-teal-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-emerald-500/30 transition-transform active:scale-95 text-base uppercase tracking-wider animate-pulse"
-              >
-                Plein Écran & Jouer 🚀
-              </button>
-
-              <button
-                onClick={toggleCamera}
-                className="w-full py-2.5 bg-slate-800/80 hover:bg-slate-700 text-slate-300 font-bold rounded-xl border border-white/10 flex items-center justify-center gap-2 text-xs"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                Changer de caméra ({facingMode === 'user' ? 'Selfie' : 'Dorsale'})
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Chargement */}
+      {/* LOADER */}
       {gameState === 'loading' && (
-        <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-30 space-y-4">
-          <div className="w-12 h-12 border-4 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-xs font-black text-amber-300 tracking-widest uppercase">INITIALISATION DU FLUX VIDEO...</p>
+        <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-50 space-y-4">
+          <div className="w-12 h-12 border-4 border-amber-400 border-t-transparent rounded-full animate-spin" />
+          <p className="text-xs font-black text-amber-300 tracking-widest uppercase">INITIALISATION DE LA PLUME...</p>
         </div>
       )}
 
-      {/* Fin de partie */}
+      {/* FIN DE PARTIE (GAME OVER) */}
       {gameState === 'gameover' && (
-        <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20 space-y-6">
+        <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-50 space-y-6">
           <div className="space-y-2">
-            <h2 className="text-3xl font-black text-red-500 uppercase tracking-wider">GAME OVER</h2>
+            <h2 className="text-3xl font-black text-red-500 uppercase tracking-wider">
+              {gameOverReason === 'mine' ? 'BOOM ! EXPLOSION' : 'TEMPS ÉCOULÉ'}
+            </h2>
             <p className="text-xs text-slate-400 uppercase font-bold tracking-widest">Score Final</p>
             <p className="text-6xl font-black text-white drop-shadow-lg">{score}</p>
           </div>
 
-          {score >= highScore && score > 0 && (
-            <div className="bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 px-4 py-1.5 rounded-full text-xs font-black uppercase tracking-wider animate-pulse">
-              🏆 NOUVEAU RECORD !
+          {/* Citation cynique style Claptrap */}
+          {endQuote && (
+            <div className="bg-slate-900/90 border border-white/10 p-4 rounded-2xl max-w-xs shadow-xl">
+              <p className="text-xs font-semibold text-amber-300 leading-relaxed italic">
+                "{endQuote}"
+              </p>
             </div>
           )}
 
-          <button
-            onClick={() => startGame()}
-            className="px-10 py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 transition-transform active:scale-95 text-lg uppercase tracking-wider"
-          >
-            Rejouer 🔄
-          </button>
+          <div className="flex flex-col gap-3 w-full max-w-xs">
+            <button
+              onClick={() => startGame()}
+              className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 active:scale-95 transition-transform text-lg uppercase tracking-wider flex items-center justify-center gap-2"
+            >
+              <RotateCcw className="w-5 h-5" /> REJOUER
+            </button>
+
+            <button
+              onClick={() => {
+                setGameStateSync('idle');
+                setCurrentScreen('home');
+              }}
+              className="w-full py-3 bg-slate-900 text-slate-400 font-bold rounded-xl border border-white/10 text-xs hover:text-white"
+            >
+              Retour au menu
+            </button>
+          </div>
         </div>
       )}
     </div>
