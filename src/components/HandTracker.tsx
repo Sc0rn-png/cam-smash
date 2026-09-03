@@ -35,7 +35,7 @@ function generatePattern(numPoints: number): Point[] {
   return points;
 }
 
-// Phrases sarcastiques & cyniques style Claptrap
+// Phrases sarcastiques style Claptrap
 const TIME_OVER_QUOTES = [
   "Le temps s'est écoulé ! Tes réflexes aussi apparemment... ⏳",
   "Oof. La lenteur incarnée. Même un paresseux sous caféine va plus vite. 🐢",
@@ -61,7 +61,6 @@ export default function HandTracker() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Nav: 'home' | 'tuto' | 'playing'
   const [currentScreen, setCurrentScreen] = useState<'home' | 'tuto' | 'playing'>('home');
   const [tutoStep, setTutoStep] = useState(1);
 
@@ -131,6 +130,16 @@ export default function HandTracker() {
     if (wakeLockRef.current) {
       await wakeLockRef.current.release();
       wakeLockRef.current = null;
+    }
+  };
+
+  // Fonction dédiée au passage en Plein Écran
+  const requestFullscreenMode = () => {
+    const docEl = document.documentElement as any;
+    if (docEl.requestFullscreen) {
+      docEl.requestFullscreen().catch(() => {});
+    } else if (docEl.webkitRequestFullscreen) {
+      docEl.webkitRequestFullscreen().catch(() => {});
     }
   };
 
@@ -240,13 +249,11 @@ export default function HandTracker() {
   };
 
   const launchGame = async () => {
+    // Exécuté immédiatement sur le clic du bouton
+    requestFullscreenMode();
+
     const isReady = await initCameraAndModel();
     if (!isReady) return;
-
-    // Plein écran sur geste direct
-    const doc = document.documentElement as any;
-    if (doc.requestFullscreen) doc.requestFullscreen().catch(() => {});
-    else if (doc.webkitRequestFullscreen) doc.webkitRequestFullscreen().catch(() => {});
 
     requestWakeLock();
     setCurrentScreen('playing');
@@ -632,7 +639,7 @@ export default function HandTracker() {
         </div>
       )}
 
-      {/* PAGE TUTORIEL (4 ÉTAPES) */}
+      {/* PAGE TUTORIEL */}
       {currentScreen === 'tuto' && (
         <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-xl flex flex-col justify-between p-6 z-40 text-center">
           <div className="flex justify-between items-center pt-2">
@@ -698,7 +705,6 @@ export default function HandTracker() {
 
             {tutoStep === 4 && (
               <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
-                {/* Représentation visuelle de la mine */}
                 <div className="relative w-20 h-20 mx-auto flex items-center justify-center">
                   <div className="w-12 h-12 rounded-full bg-slate-950 border-2 border-red-500 flex items-center justify-center shadow-[0_0_20px_rgba(239,68,68,0.5)] animate-pulse">
                     <div className="w-2.5 h-2.5 rounded-full bg-red-400" />
@@ -802,7 +808,7 @@ export default function HandTracker() {
         </div>
       )}
 
-      {/* FIN DE PARTIE (GAME OVER) */}
+      {/* FIN DE PARTIE */}
       {gameState === 'gameover' && (
         <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-50 space-y-6">
           <div className="space-y-2">
@@ -813,7 +819,6 @@ export default function HandTracker() {
             <p className="text-6xl font-black text-white drop-shadow-lg">{score}</p>
           </div>
 
-          {/* Citation cynique style Claptrap */}
           {endQuote && (
             <div className="bg-slate-900/90 border border-white/10 p-4 rounded-2xl max-w-xs shadow-xl">
               <p className="text-xs font-semibold text-amber-300 leading-relaxed italic">
@@ -824,7 +829,10 @@ export default function HandTracker() {
 
           <div className="flex flex-col gap-3 w-full max-w-xs">
             <button
-              onClick={() => startGame()}
+              onClick={() => {
+                requestFullscreenMode();
+                startGame();
+              }}
               className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 active:scale-95 transition-transform text-lg uppercase tracking-wider flex items-center justify-center gap-2"
             >
               <RotateCcw className="w-5 h-5" /> REJOUER
