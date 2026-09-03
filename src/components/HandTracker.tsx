@@ -6,19 +6,25 @@ interface Point {
   y: number;
 }
 
-interface SymbolDef {
-  name: string;
-  points: Point[];
-}
-
 interface Particle {
   x: number;
   y: number;
   vx: number;
   vy: number;
-  radius: number;
+  size: number;
   color: string;
+  alpha: number;
   life: number;
+  maxLife: number;
+}
+
+interface FloatingText {
+  id: number;
+  text: string;
+  x: number;
+  y: number;
+  color: string;
+  alpha: number;
 }
 
 const PLAY_ZONE = {
@@ -28,72 +34,65 @@ const PLAY_ZONE = {
   yMax: 0.70,
 };
 
-const SYMBOLS: SymbolDef[] = [
-  {
-    name: 'Trait Céleste',
-    points: [
-      { x: 0.2, y: 0.5 },
-      { x: 0.8, y: 0.5 },
-    ],
-  },
-  {
-    name: 'Éclair Vulcain',
-    points: [
-      { x: 0.2, y: 0.2 },
-      { x: 0.8, y: 0.5 },
-      { x: 0.2, y: 0.5 },
-      { x: 0.8, y: 0.8 },
-    ],
-  },
-  {
-    name: 'Rune V',
-    points: [
-      { x: 0.2, y: 0.2 },
-      { x: 0.5, y: 0.8 },
-      { x: 0.8, y: 0.2 },
-    ],
-  },
-  {
-    name: 'Pic Glacial',
-    points: [
-      { x: 0.2, y: 0.8 },
-      { x: 0.5, y: 0.2 },
-      { x: 0.8, y: 0.8 },
-    ],
-  },
-];
+// Générateur équitable de formes aléatoires bien espacées
+function generatePattern(numPoints: number): Point[] {
+  const points: Point[] = [];
+  const minDist = 0.28;
+  let attempts = 0;
 
-const MONSTERS = [
-  { name: 'Gobelin d’Ombre', hp: 30, color: '#22c55e', emoji: '👹' },
-  { name: 'Golem de Pierre', hp: 50, color: '#f59e0b', emoji: '🗿' },
-  { name: 'Démon Pourpre', hp: 70, color: '#ef4444', emoji: '👾' },
-  { name: 'Dragon d’Éther', hp: 100, color: '#a855f7', emoji: '🐉' },
-];
+  while (points.length < numPoints && attempts < 200) {
+    attempts++;
+    const candidate: Point = {
+      x: Number((0.15 + Math.random() * 0.7).toFixed(2)),
+      y: Number((0.15 + Math.random() * 0.7).toFixed(2)),
+    };
+
+    const isFarEnough = points.every((p) => {
+      const dx = p.x - candidate.x;
+      const dy = p.y - candidate.y;
+      return Math.hypot(dx, dy) >= minDist;
+    });
+
+    if (isFarEnough) {
+      points.push(candidate);
+    }
+  }
+
+  // Fallback grille si tirage difficile
+  if (points.length < numPoints) {
+    const grid = [
+      { x: 0.2, y: 0.2 },
+      { x: 0.8, y: 0.2 },
+      { x: 0.5, y: 0.5 },
+      { x: 0.2, y: 0.8 },
+      { x: 0.8, y: 0.8 },
+    ];
+    return grid.slice(0, numPoints);
+  }
+
+  return points;
+}
 
 export default function HandTracker() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const [gameState, setGameState] = useState<'idle' | 'loading' | 'playing' | 'gameover'>('idle');
-  const [monstersKilled, setMonstersKilled] = useState(0);
+  const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(0);
-  const [timeLeft, setTimeLeft] = useState(30);
+  const [timeLeft, setTimeLeft] = useState(60);
   const [errorMsg, setErrorMsg] = useState('');
-
-  const [monsterIndex, setMonsterIndex] = useState(0);
-  const [currentHp, setCurrentHp] = useState(30);
+  const [bonusNotification, setBonusNotification] = useState<string | null>(null);
 
   const gameStateRef = useRef(gameState);
   const landmarkerRef = useRef<HandLandmarker | null>(null);
   const animationFrameId = useRef<number | null>(null);
-
-  // Verrou anti-mise en veille
   const wakeLockRef = useRef<WakeLockSentinel | null>(null);
 
-  const currentSymbolRef = useRef<SymbolDef>(SYMBOLS[0]);
+  const currentPatternRef = useRef<Point[]>([]);
   const activeCheckpointRef = useRef<number>(0);
-  const userTrailRef = useRef<Point[]>([]);
   const particlesRef = useRef<Particle[]>([]);
+  const floatingTextsRef = useRef<FloatingText[]>([]);
   const lastAITimeRef = useRef<number>(0);
   const fingerPosRef = useRef<Point | null>(null);
 
@@ -102,8 +101,19 @@ export default function HandTracker() {
     setGameState(state);
   };
 
+  // Calcul du niveau selon le score
+  const getLevelInfo = (currentScore: number) => {
+    if (currentScore >= 400) {
+      return { level: 3, numPoints: 5, timeBonus: 6, name: 'OVERDRIVE', color: '#ec4899', ptsPerShape: 25 };
+    }
+    if (currentScore >= 200) {
+      return { level: 2, numPoints: 4, timeBonus: 8, name: 'SPEED', color: '#f59e0b', ptsPerShape: 15 };
+    }
+    return { level: 1, numPoints: 3, timeBonus: 10, name: 'INTENSE', color: '#06b6d4', ptsPerShape: 10 };
+  };
+
   useEffect(() => {
-    const saved = localStorage.getItem('wizard_high_score');
+    const saved = localStorage.getItem('hyper_tracer_high_score');
     if (saved) setHighScore(parseInt(saved, 10));
 
     const handleResize = () => {
@@ -117,28 +127,7 @@ export default function HandTracker() {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // Réactivation du Wake Lock au retour sur l'onglet
-  useEffect(() => {
-    const handleVisibilityChange = async () => {
-      if (wakeLockRef.current !== null && document.visibilityState === 'visible') {
-        try {
-          wakeLockRef.current = await navigator.wakeLock.request('screen');
-        } catch (err) {
-          console.warn('Wake Lock réactivation échouée :', err);
-        }
-      }
-    };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      if (wakeLockRef.current) {
-        wakeLockRef.current.release();
-        wakeLockRef.current = null;
-      }
-    };
-  }, []);
-
+  // Timer principal
   useEffect(() => {
     let timer: NodeJS.Timeout;
     if (gameState === 'playing' && timeLeft > 0) {
@@ -155,41 +144,44 @@ export default function HandTracker() {
     return () => clearInterval(timer);
   }, [gameState, timeLeft]);
 
-  // Passage plein écran & blocage de la mise en veille
+  // Wake Lock
+  useEffect(() => {
+    const handleVisibilityChange = async () => {
+      if (wakeLockRef.current !== null && document.visibilityState === 'visible') {
+        try {
+          wakeLockRef.current = await navigator.wakeLock.request('screen');
+        } catch (err) {
+          console.warn('Wake Lock error:', err);
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release();
+        wakeLockRef.current = null;
+      }
+    };
+  }, []);
+
   const enableFullScreenAndWakeLock = async () => {
     try {
       if (!document.fullscreenElement) {
         if (document.documentElement.requestFullscreen) {
           await document.documentElement.requestFullscreen();
-        } else if ((document.documentElement as any).webkitRequestFullscreen) {
-          await (document.documentElement as any).webkitRequestFullscreen();
         }
       }
     } catch (err) {
-      console.warn('Plein écran non supporté ou bloqué :', err);
+      console.warn('Fullscreen failed:', err);
     }
-
     try {
       if ('wakeLock' in navigator) {
         wakeLockRef.current = await navigator.wakeLock.request('screen');
       }
     } catch (err) {
-      console.warn('Anti-mise en veille non supporté :', err);
+      console.warn('WakeLock failed:', err);
     }
-  };
-
-  const spawnNextMonster = (killedCount: number) => {
-    const mIdx = killedCount % MONSTERS.length;
-    setMonsterIndex(mIdx);
-    setCurrentHp(MONSTERS[mIdx].hp);
-    pickRandomSymbol();
-  };
-
-  const pickRandomSymbol = () => {
-    const nextSymbol = SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)];
-    currentSymbolRef.current = nextSymbol;
-    activeCheckpointRef.current = 0;
-    userTrailRef.current = [];
   };
 
   const zoneToScreen = (pt: Point, width: number, height: number): Point => {
@@ -197,46 +189,58 @@ export default function HandTracker() {
     const zoneH = (PLAY_ZONE.yMax - PLAY_ZONE.yMin) * height;
     const startX = PLAY_ZONE.xMin * width;
     const startY = PLAY_ZONE.yMin * height;
-
     return {
       x: startX + pt.x * zoneW,
       y: startY + pt.y * zoneH,
     };
   };
 
-  const createSpellExplosion = (x: number, y: number, color: string) => {
-    for (let i = 0; i < 30; i++) {
+  // Émission de particules de flamme
+  const emitFlameParticles = (x: number, y: number) => {
+    const fireColors = ['#ffffff', '#fef08a', '#f97316', '#ef4444', '#b91c1c'];
+    for (let i = 0; i < 4; i++) {
       const angle = Math.random() * Math.PI * 2;
-      const speed = Math.random() * 9 + 3;
+      const speed = Math.random() * 3 + 1;
+      particlesRef.current.push({
+        x: x + (Math.random() - 0.5) * 8,
+        y: y + (Math.random() - 0.5) * 8,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed - 1.5,
+        size: Math.random() * 8 + 4,
+        color: fireColors[Math.floor(Math.random() * fireColors.length)],
+        alpha: 1.0,
+        life: 1.0,
+        maxLife: Math.random() * 0.4 + 0.3,
+      });
+    }
+  };
+
+  // Explosion d'étincelles
+  const triggerExplosion = (x: number, y: number, color: string) => {
+    for (let i = 0; i < 35; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = Math.random() * 12 + 4;
       particlesRef.current.push({
         x,
         y,
         vx: Math.cos(angle) * speed,
         vy: Math.sin(angle) * speed,
-        radius: Math.random() * 6 + 3,
+        size: Math.random() * 6 + 3,
         color,
+        alpha: 1.0,
         life: 1.0,
+        maxLife: Math.random() * 0.5 + 0.5,
       });
     }
   };
 
-  const spawnSparks = (x: number, y: number) => {
-    for (let i = 0; i < 3; i++) {
-      particlesRef.current.push({
-        x: x + (Math.random() - 0.5) * 12,
-        y: y + (Math.random() - 0.5) * 12,
-        vx: (Math.random() - 0.5) * 5,
-        vy: (Math.random() - 0.5) * 5,
-        radius: Math.random() * 3 + 1,
-        color: Math.random() > 0.4 ? '#fde047' : '#38bdf8',
-        life: 0.7,
-      });
-    }
+  const spawnNewPattern = (numPoints: number) => {
+    currentPatternRef.current = generatePattern(numPoints);
+    activeCheckpointRef.current = 0;
   };
 
   const startCameraAndGame = async () => {
     await enableFullScreenAndWakeLock();
-
     setGameStateSync('loading');
     setErrorMsg('');
 
@@ -245,7 +249,6 @@ export default function HandTracker() {
         const vision = await FilesetResolver.forVisionTasks(
           'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
         );
-
         landmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
           baseOptions: {
             modelAssetPath:
@@ -273,15 +276,16 @@ export default function HandTracker() {
     } catch (err: unknown) {
       console.error(err);
       setGameStateSync('error');
-      setErrorMsg(err instanceof Error ? err.message : "Erreur d'accès caméra.");
+      setErrorMsg(err instanceof Error ? err.message : 'Erreur caméra.');
     }
   };
 
   const startGame = () => {
-    setMonstersKilled(0);
-    setTimeLeft(30);
+    setScore(0);
+    setTimeLeft(60);
     particlesRef.current = [];
-    spawnNextMonster(0);
+    floatingTextsRef.current = [];
+    spawnNewPattern(3);
     setGameStateSync('playing');
 
     if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
@@ -298,13 +302,19 @@ export default function HandTracker() {
     if (!ctx) return;
 
     if (video.readyState >= 2) {
+      // Miroir webcam
       ctx.save();
       ctx.translate(canvas.width, 0);
       ctx.scale(-1, 1);
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       ctx.restore();
 
-      if (now - lastAITimeRef.current > 30) {
+      // Assombrissement du fond pour faire ressortir les flammes
+      ctx.fillStyle = 'rgba(10, 10, 20, 0.55)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Suivi IA
+      if (now - lastAITimeRef.current > 25) {
         lastAITimeRef.current = now;
         const results = landmarker.detectForVideo(video, now);
 
@@ -333,120 +343,130 @@ export default function HandTracker() {
       const finger = fingerPosRef.current;
 
       if (gameStateRef.current === 'playing') {
-        const symbol = currentSymbolRef.current;
+        const pattern = currentPatternRef.current;
 
-        // Lignes reliant les points du symbole
-        ctx.beginPath();
-        symbol.points.forEach((pt, idx) => {
-          const pos = zoneToScreen(pt, canvas.width, canvas.height);
-          if (idx === 0) ctx.moveTo(pos.x, pos.y);
-          else ctx.lineTo(pos.x, pos.y);
-        });
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
-        ctx.lineWidth = 6;
-        ctx.stroke();
+        // Tracé des lignes reliant la forme
+        if (pattern.length > 0) {
+          ctx.beginPath();
+          pattern.forEach((pt, idx) => {
+            const pos = zoneToScreen(pt, canvas.width, canvas.height);
+            if (idx === 0) ctx.moveTo(pos.x, pos.y);
+            else ctx.lineTo(pos.x, pos.y);
+          });
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+          ctx.lineWidth = 6;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.stroke();
+        }
 
-        // Cercles numérotés
-        symbol.points.forEach((pt, idx) => {
+        // Checkpoints / Points numérotés
+        pattern.forEach((pt, idx) => {
           const pos = zoneToScreen(pt, canvas.width, canvas.height);
           const isCurrent = idx === activeCheckpointRef.current;
           const isPassed = idx < activeCheckpointRef.current;
 
           ctx.beginPath();
-          ctx.arc(pos.x, pos.y, isCurrent ? 28 : 20, 0, Math.PI * 2);
+          ctx.arc(pos.x, pos.y, isCurrent ? 26 : 18, 0, Math.PI * 2);
           ctx.fillStyle = isPassed
-            ? 'rgba(34, 197, 94, 0.6)'
+            ? '#22c55e'
             : isCurrent
-            ? 'rgba(168, 85, 247, 0.7)'
-            : 'rgba(15, 23, 42, 0.8)';
+            ? '#f59e0b'
+            : 'rgba(30, 41, 59, 0.85)';
           ctx.fill();
 
-          ctx.strokeStyle = isPassed ? '#22c55e' : isCurrent ? '#c084fc' : '#ffffff';
+          ctx.strokeStyle = isPassed ? '#86efac' : isCurrent ? '#fef08a' : '#94a3b8';
           ctx.lineWidth = isCurrent ? 4 : 2;
           ctx.stroke();
 
           ctx.fillStyle = '#ffffff';
-          ctx.font = `bold ${isCurrent ? 20 : 15}px sans-serif`;
+          ctx.font = `bold ${isCurrent ? 18 : 14}px sans-serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillText(String(idx + 1), pos.x, pos.y);
         });
 
-        // Validation du tracé
-        const targetPt = symbol.points[activeCheckpointRef.current];
+        // Validation du franchissement des points
+        const targetPt = pattern[activeCheckpointRef.current];
         if (targetPt && finger) {
           const targetPos = zoneToScreen(targetPt, canvas.width, canvas.height);
           const dist = Math.hypot(finger.x - targetPos.x, finger.y - targetPos.y);
 
-          userTrailRef.current.push({ x: finger.x, y: finger.y });
-          if (userTrailRef.current.length > 14) userTrailRef.current.shift();
+          // Émission du sillage de flammes au bout du doigt
+          emitFlameParticles(finger.x, finger.y);
 
-          spawnSparks(finger.x, finger.y);
-
-          if (dist < 45) {
+          if (dist < 48) {
+            triggerExplosion(targetPos.x, targetPos.y, '#f59e0b');
             activeCheckpointRef.current += 1;
 
-            if (activeCheckpointRef.current >= symbol.points.length) {
-              createSpellExplosion(targetPos.x, targetPos.y, '#c084fc');
-
-              setCurrentHp((prevHp) => {
-                const newHp = prevHp - 25;
-                if (newHp <= 0) {
-                  setMonstersKilled((k) => {
-                    const nextKilled = k + 1;
-                    if (nextKilled > highScore) {
-                      setHighScore(nextKilled);
-                      localStorage.setItem('wizard_high_score', nextKilled.toString());
-                    }
-                    spawnNextMonster(nextKilled);
-                    return nextKilled;
-                  });
-                } else {
-                  pickRandomSymbol();
+            // Forme complétée !
+            if (activeCheckpointRef.current >= pattern.length) {
+              setScore((prevScore) => {
+                const newScore = prevScore + getLevelInfo(prevScore).ptsPerShape;
+                if (newScore > highScore) {
+                  setHighScore(newScore);
+                  localStorage.setItem('hyper_tracer_high_score', newScore.toString());
                 }
-                return newHp;
+
+                const currentLvl = getLevelInfo(newScore);
+                
+                // Bonus de temps
+                setTimeLeft((t) => t + currentLvl.timeBonus);
+
+                // Notification visuelle
+                setBonusNotification(`+${currentLvl.timeBonus}s`);
+                setTimeout(() => setBonusNotification(null), 800);
+
+                // Texte flottant
+                floatingTextsRef.current.push({
+                  id: Date.now(),
+                  text: `+${currentLvl.timeBonus}s`,
+                  x: targetPos.x,
+                  y: targetPos.y - 20,
+                  color: '#4ade80',
+                  alpha: 1.0,
+                });
+
+                // Génération de la forme suivante
+                spawnNewPattern(currentLvl.numPoints);
+                return newScore;
               });
             }
           }
         }
 
-        // Traînée lumineuse
-        if (userTrailRef.current.length > 1) {
-          ctx.beginPath();
-          ctx.moveTo(userTrailRef.current[0].x, userTrailRef.current[0].y);
-          for (let i = 1; i < userTrailRef.current.length; i++) {
-            ctx.lineTo(userTrailRef.current[i].x, userTrailRef.current[i].y);
-          }
-          ctx.strokeStyle = '#38bdf8';
-          ctx.lineWidth = 8;
-          ctx.lineCap = 'round';
-          ctx.stroke();
-        }
-
-        // Curseur baguette
-        if (finger) {
-          ctx.beginPath();
-          ctx.arc(finger.x, finger.y, 12, 0, Math.PI * 2);
-          ctx.fillStyle = '#fde047';
-          ctx.fill();
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 3;
-          ctx.stroke();
-        }
-
-        // Particules
+        // Rendu & Mise à jour des Particules de Flammes
         particlesRef.current = particlesRef.current.filter((p) => {
           p.x += p.vx;
           p.y += p.vy;
-          p.life -= 0.05;
-          if (p.life <= 0) return false;
+          p.life -= 0.03;
+          p.size *= 0.95;
 
+          if (p.life <= 0 || p.size <= 0.5) return false;
+
+          ctx.save();
+          ctx.globalAlpha = Math.max(0, p.life);
           ctx.beginPath();
-          ctx.arc(p.x, p.y, Math.max(0.5, p.radius * p.life), 0, Math.PI * 2);
+          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
           ctx.fillStyle = p.color;
-          ctx.globalAlpha = p.life;
           ctx.fill();
-          ctx.globalAlpha = 1.0;
+          ctx.restore();
+          return true;
+        });
+
+        // Rendu des textes flottants (+10s)
+        floatingTextsRef.current = floatingTextsRef.current.filter((ft) => {
+          ft.y -= 1.8;
+          ft.alpha -= 0.025;
+          if (ft.alpha <= 0) return false;
+
+          ctx.save();
+          ctx.globalAlpha = Math.max(0, ft.alpha);
+          ctx.font = 'black 24px sans-serif';
+          ctx.fillStyle = ft.color;
+          ctx.textAlign = 'center';
+          ctx.fillText(ft.text, ft.x, ft.y);
+          ctx.restore();
           return true;
         });
       }
@@ -455,107 +475,120 @@ export default function HandTracker() {
     animationFrameId.current = requestAnimationFrame(renderLoop);
   };
 
-  const currentMonster = MONSTERS[monsterIndex];
+  const levelInfo = getLevelInfo(score);
 
   return (
-    <div className="fixed inset-0 w-screen h-screen bg-black overflow-hidden select-none">
+    <div className="fixed inset-0 w-screen h-screen bg-slate-950 overflow-hidden select-none font-sans">
       <video ref={videoRef} className="hidden" playsInline autoPlay muted />
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full object-cover" />
 
-      {/* HUD Supérieur */}
-      <div className="absolute top-0 left-0 right-0 p-4 pt-6 flex flex-col items-center z-10 bg-gradient-to-b from-black/90 via-black/50 to-transparent pointer-events-none space-y-3">
-        <div className="flex justify-between items-center w-full max-w-md">
-          <div className="text-left">
-            <p className="text-[10px] text-slate-300 font-bold uppercase tracking-wider">Vaincus</p>
-            <p className="text-3xl font-black text-purple-400">{monstersKilled}</p>
-          </div>
-          <div className="text-center">
-            <p className="text-[10px] text-slate-300 font-bold uppercase tracking-wider">Temps</p>
-            <p
-              className={`text-3xl font-black ${
-                timeLeft <= 5 ? 'text-red-500 animate-bounce' : 'text-amber-400'
-              }`}
+      {/* HUD Supérieur - Style Arcade Modernisé */}
+      <div className="absolute top-0 left-0 right-0 p-4 pt-6 flex flex-col items-center z-10 bg-gradient-to-b from-black/90 via-black/40 to-transparent pointer-events-none space-y-2">
+        <div className="flex justify-between items-center w-full max-w-md px-2">
+          {/* Badge Niveau */}
+          <div className="flex flex-col items-start">
+            <span
+              className="text-[10px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full text-black"
+              style={{ backgroundColor: levelInfo.color }}
             >
-              {timeLeft}s
-            </p>
+              LVL {levelInfo.level} • {levelInfo.name}
+            </span>
+            <p className="text-3xl font-black text-white mt-1 drop-shadow-md">{score} <span className="text-xs text-slate-400 font-bold">PTS</span></p>
           </div>
-          <div className="text-right">
-            <p className="text-[10px] text-slate-300 font-bold uppercase tracking-wider">Record</p>
-            <p className="text-3xl font-black text-emerald-400">{highScore}</p>
+
+          {/* Chrono central avec effet Dopamine sur Bonus */}
+          <div className="relative flex flex-col items-center">
+            <span className="text-[10px] text-slate-300 font-extrabold uppercase tracking-widest">CHRONO</span>
+            <div className="flex items-center space-x-1">
+              <p
+                className={`text-4xl font-black transition-transform ${
+                  timeLeft <= 10 ? 'text-red-500 animate-ping' : 'text-amber-400'
+                }`}
+              >
+                {timeLeft}s
+              </p>
+            </div>
+
+            {/* Notification flottante de temps additionnel */}
+            {bonusNotification && (
+              <span className="absolute -bottom-6 text-xl font-black text-green-400 animate-bounce drop-shadow-[0_0_10px_rgba(74,222,128,0.8)]">
+                {bonusNotification}
+              </span>
+            )}
+          </div>
+
+          {/* Meilleur Score */}
+          <div className="flex flex-col items-end">
+            <span className="text-[10px] text-slate-400 font-extrabold uppercase tracking-widest">RECORD</span>
+            <p className="text-3xl font-black text-emerald-400 drop-shadow-md">{highScore}</p>
           </div>
         </div>
 
-        {/* Barre de vie */}
+        {/* Indicateur explicatif du mode actuel */}
         {gameState === 'playing' && (
-          <div className="w-full max-w-xs space-y-1 text-center">
-            <div className="flex justify-between items-center text-xs font-bold text-white px-1">
-              <span>{currentMonster.name}</span>
-              <span>
-                {Math.max(0, currentHp)} / {currentMonster.hp} HP
-              </span>
-            </div>
-            <div className="w-full bg-slate-900/80 h-3.5 rounded-full overflow-hidden border border-white/20 p-0.5 backdrop-blur-md shadow-lg">
-              <div
-                className="h-full transition-all duration-300 rounded-full"
-                style={{
-                  width: `${(Math.max(0, currentHp) / currentMonster.hp) * 100}%`,
-                  backgroundColor: currentMonster.color,
-                }}
-              />
-            </div>
+          <div className="bg-black/60 border border-white/10 backdrop-blur-md px-4 py-1 rounded-full text-center">
+            <p className="text-xs font-bold text-slate-200">
+              {levelInfo.numPoints} points à relier <span className="text-green-400">(+{levelInfo.timeBonus}s par forme)</span>
+            </p>
           </div>
         )}
       </div>
 
-      {/* Monstre */}
-      {gameState === 'playing' && (
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 pointer-events-none text-center">
-          <div className="text-9xl drop-shadow-2xl animate-pulse">{currentMonster.emoji}</div>
-        </div>
-      )}
-
       {/* Écran d'accueil */}
       {gameState === 'idle' && (
-        <div className="absolute inset-0 bg-slate-950/85 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20">
-          <h1 className="text-4xl font-black text-purple-400 mb-2">WIZARD DUEL 🧙‍♂️⚡</h1>
-          <p className="text-sm text-slate-300 max-w-xs mb-6">
-            Trace les runes magiques avec ton index pour terrasser les monstres avant la fin du temps !
-          </p>
-          <button
-            onClick={startCameraAndGame}
-            className="px-8 py-4 bg-purple-600 hover:bg-purple-500 text-white font-bold rounded-2xl shadow-xl shadow-purple-500/30 transition-transform active:scale-95 text-lg"
-          >
-            Invoquer la magie 🪄
-          </button>
+        <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-lg flex flex-col items-center justify-center p-6 text-center z-20">
+          <div className="max-w-xs space-y-6">
+            <div className="inline-block bg-gradient-to-r from-orange-500 to-amber-400 p-3 rounded-2xl shadow-xl shadow-orange-500/20 mb-2">
+              <span className="text-4xl">🔥</span>
+            </div>
+            <h1 className="text-4xl font-black text-white tracking-tight">HYPER TRACER</h1>
+            <p className="text-sm text-slate-300 font-medium leading-relaxed">
+              Relie les checkpoints numérotés avec ton index pour gagner du temps et faire exploser ton score !
+            </p>
+
+            <button
+              onClick={startCameraAndGame}
+              className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 transition-transform active:scale-95 text-lg uppercase tracking-wider"
+            >
+              Lancer la partie 🚀
+            </button>
+          </div>
         </div>
       )}
 
-      {/* Chargement */}
+      {/* Écran de Chargement */}
       {gameState === 'loading' && (
         <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-20 space-y-4">
-          <div className="w-12 h-12 border-4 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-sm font-semibold text-purple-300">Préparation du rituel...</p>
+          <div className="w-12 h-12 border-4 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-sm font-bold text-amber-300 tracking-wider">CONNEXION CAPTEUR...</p>
         </div>
       )}
 
-      {/* Game Over */}
+      {/* Game Over - Relance Immédiate */}
       {gameState === 'gameover' && (
-        <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20 space-y-4">
-          <h2 className="text-3xl font-black text-red-500">TEMPS ÉCOULÉ ! ⏱️</h2>
-          <div className="space-y-1">
-            <p className="text-slate-400 text-sm">Monstres vaincus</p>
-            <p className="text-6xl font-black text-white">{monstersKilled}</p>
+        <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center z-20 space-y-6">
+          <div className="space-y-2">
+            <h2 className="text-3xl font-black text-red-500 uppercase tracking-wider">TEMPS ÉCOULÉ !</h2>
+            <p className="text-xs text-slate-400 uppercase font-bold tracking-widest">Score Final</p>
+            <p className="text-6xl font-black text-white drop-shadow-lg">{score}</p>
           </div>
+
+          {score >= highScore && score > 0 && (
+            <div className="bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 px-4 py-1.5 rounded-full text-xs font-black uppercase tracking-wider animate-pulse">
+              🏆 NOUVEAU RECORD !
+            </div>
+          )}
+
           <button
             onClick={startGame}
-            className="px-8 py-3.5 bg-purple-600 hover:bg-purple-500 text-white font-bold rounded-xl shadow-lg transition-transform active:scale-95 text-base mt-2"
+            className="px-10 py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 transition-transform active:scale-95 text-lg uppercase tracking-wider"
           >
-            Recommencer 🔄
+            Rejouer 🔄
           </button>
         </div>
       )}
 
-      {/* Erreur */}
+      {/* Écran d'Erreur */}
       {gameState === 'error' && (
         <div className="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center z-20 space-y-4">
           <p className="text-sm text-red-400 font-semibold">{errorMsg}</p>
