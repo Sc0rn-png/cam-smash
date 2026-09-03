@@ -54,6 +54,7 @@ export default function HandTracker() {
   const scoreRef = useRef(0);
   const landmarkerRef = useRef<HandLandmarker | null>(null);
   const animationFrameId = useRef<number | null>(null);
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
 
   const currentPatternRef = useRef<Point[]>([]);
   const activeCheckpointRef = useRef<number>(0);
@@ -69,7 +70,6 @@ export default function HandTracker() {
     setGameState(state);
   };
 
-  // Niveaux avec thèmes de couleurs uniques pour les orbes
   const getLevelInfo = (currentScore: number) => {
     if (currentScore >= 600) {
       return { 
@@ -101,6 +101,24 @@ export default function HandTracker() {
     };
   };
 
+  // Empêcher la mise en veille du téléphone
+  const requestWakeLock = async () => {
+    try {
+      if ('wakeLock' in navigator && !wakeLockRef.current) {
+        wakeLockRef.current = await navigator.wakeLock.request('screen');
+      }
+    } catch (err) {
+      console.warn('Screen Wake Lock indisponible :', err);
+    }
+  };
+
+  const releaseWakeLock = async () => {
+    if (wakeLockRef.current) {
+      await wakeLockRef.current.release();
+      wakeLockRef.current = null;
+    }
+  };
+
   useEffect(() => {
     const savedScore = localStorage.getItem('hyper_tracer_high_score');
     if (savedScore) setHighScore(parseInt(savedScore, 10));
@@ -117,9 +135,18 @@ export default function HandTracker() {
     handleResize();
     window.addEventListener('resize', handleResize);
 
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && gameStateRef.current === 'playing') {
+        requestWakeLock();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
     return () => {
       window.removeEventListener('resize', handleResize);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
+      releaseWakeLock();
     };
   }, []);
 
@@ -130,6 +157,7 @@ export default function HandTracker() {
         setTimeLeft((prev) => {
           if (prev <= 1) {
             setGameStateSync('gameover');
+            releaseWakeLock();
             return 0;
           }
           return prev - 1;
@@ -139,7 +167,7 @@ export default function HandTracker() {
     return () => clearInterval(timer);
   }, [gameState, timeLeft]);
 
-  // Plein écran automatique au démarrage
+  // Forcer le plein écran (doit être synchrone au clic)
   const forceFullscreen = () => {
     const docEl = document.documentElement as HTMLElement & {
       webkitRequestFullscreen?: () => Promise<void>;
@@ -149,6 +177,12 @@ export default function HandTracker() {
     } else if (docEl.webkitRequestFullscreen) {
       docEl.webkitRequestFullscreen().catch(() => {});
     }
+  };
+
+  const handleUserLaunch = () => {
+    forceFullscreen();
+    requestWakeLock();
+    startCameraAndGame();
   };
 
   const closeTutorial = () => {
@@ -253,7 +287,6 @@ export default function HandTracker() {
   };
 
   const startCameraAndGame = async () => {
-    forceFullscreen();
     if (showTutorial) closeTutorial();
     setGameStateSync('loading');
     setErrorMsg('');
@@ -295,7 +328,6 @@ export default function HandTracker() {
   };
 
   const startGame = () => {
-    forceFullscreen();
     setScore(0);
     scoreRef.current = 0;
     setTimeLeft(45);
@@ -376,8 +408,6 @@ export default function HandTracker() {
 
           ctx.beginPath();
           ctx.arc(pos.x, pos.y, isCurrent ? 24 : 18, 0, Math.PI * 2);
-          
-          // Couleur dynamique selon le niveau !
           ctx.fillStyle = isPassed ? '#22c55e' : isCurrent ? currentLvlInfo.orbColor : 'rgba(30, 41, 59, 0.9)';
           ctx.fill();
 
@@ -447,6 +477,7 @@ export default function HandTracker() {
 
                 if (newLives <= 0) {
                   setGameStateSync('gameover');
+                  releaseWakeLock();
                 }
                 return newLives;
               });
@@ -607,7 +638,7 @@ export default function HandTracker() {
             </div>
 
             <button
-              onClick={startCameraAndGame}
+              onClick={handleUserLaunch}
               className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 text-base uppercase tracking-wider transition-transform active:scale-95"
             >
               C'est parti ! 🚀
@@ -631,7 +662,7 @@ export default function HandTracker() {
 
             <div className="space-y-3">
               <button
-                onClick={startCameraAndGame}
+                onClick={handleUserLaunch}
                 className="w-full py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 transition-transform active:scale-95 text-lg uppercase tracking-wider"
               >
                 Jouer 🚀
@@ -670,7 +701,11 @@ export default function HandTracker() {
           )}
 
           <button
-            onClick={startGame}
+            onClick={() => {
+              forceFullscreen();
+              requestWakeLock();
+              startGame();
+            }}
             className="px-10 py-4 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/30 transition-transform active:scale-95 text-lg uppercase tracking-wider"
           >
             Rejouer 🔄
