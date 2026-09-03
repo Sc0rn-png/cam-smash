@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect } from 'react';
 import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
-import { Heart, Play, HelpCircle, SkipForward, ArrowRight, RotateCcw } from 'lucide-react';
+import { Heart, Play, HelpCircle, SkipForward, ArrowRight, RotateCcw, Smartphone } from 'lucide-react';
 
 interface Point { x: number; y: number; }
 interface Mine { x: number; y: number; radius: number; }
@@ -550,13 +550,27 @@ export default function HandTracker() {
                     localStorage.setItem('hyper_tracer_high_score', newScore.toString());
                   }
 
-                  if (shapesCompletedRef.current % 3 === 0) {
-                    setTimeLeft((t) => t + 5);
-                    setBonusNotification('+5s');
+                  const nextLvlInfo = getLevelInfo(newScore);
+
+                  // GESTION DYNAMIQUE DU BONUS DE TEMPS
+                  let shapesNeeded = 3;
+                  let bonusAmount = 5;
+
+                  if (nextLvlInfo.level >= 5) {
+                    shapesNeeded = 2; // Tous les 2 formes validées au niveau 5
+                    bonusAmount = 8;  // +8 secondes
+                  } else if (nextLvlInfo.level === 4) {
+                    shapesNeeded = 3; // Tous les 3 formes validées au niveau 4
+                    bonusAmount = 8;  // +8 secondes
+                  }
+
+                  // Application du bonus
+                  if (shapesCompletedRef.current % shapesNeeded === 0) {
+                    setTimeLeft((t) => t + bonusAmount);
+                    setBonusNotification(`+${bonusAmount}s`);
                     setTimeout(() => setBonusNotification(null), 800);
                   }
 
-                  const nextLvlInfo = getLevelInfo(newScore);
                   spawnNewPattern(nextLvlInfo.numPoints, canvas.width, canvas.height, nextLvlInfo.numMines);
                   return newScore;
                 });
@@ -678,8 +692,13 @@ export default function HandTracker() {
           <div className="my-auto max-w-xs mx-auto space-y-6">
             {tutoStep === 1 && (
               <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
-                <div className="text-5xl bg-slate-900 border border-white/10 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto shadow-xl">
-                  📱
+                <div className="relative w-24 h-24 mx-auto flex items-center justify-center">
+                  <div className="absolute inset-0 bg-amber-500/10 rounded-full blur-xl animate-pulse" />
+                  <div className="relative bg-slate-900 border border-slate-700 w-14 h-24 rounded-2xl flex flex-col items-center justify-between p-2 shadow-xl shadow-amber-500/10">
+                    <div className="w-5 h-1 bg-slate-700 rounded-full mt-1" />
+                    <Smartphone className="w-6 h-6 text-amber-400 opacity-90" strokeWidth={1.5} />
+                    <div className="w-3 h-3 rounded-full border border-slate-700 mb-1" />
+                  </div>
                 </div>
                 <h2 className="text-xl font-black text-white uppercase tracking-wide">
                   Positionne ton écran
@@ -710,14 +729,31 @@ export default function HandTracker() {
 
             {tutoStep === 3 && (
               <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
-                <div className="text-5xl bg-slate-900 border border-white/10 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto shadow-xl">
-                  ⚡
+                <div className="flex gap-4 mx-auto justify-center items-center h-20">
+                  {/* Orbe validée */}
+                  <div className="relative">
+                    <div className="w-[36px] h-[36px] rounded-full bg-[#22c55e] border-2 border-[#86efac] flex items-center justify-center shadow-lg z-10 relative">
+                      <span className="text-white text-[13px] font-bold">1</span>
+                    </div>
+                    <div className="absolute w-8 h-1 bg-[rgba(255,255,255,0.2)] -right-6 top-1/2 -translate-y-1/2 border-y border-dashed border-transparent" style={{ borderTopColor: 'rgba(255,255,255,0.2)' }} />
+                  </div>
+                  {/* Orbe active */}
+                  <div className="w-[48px] h-[48px] rounded-full bg-[#38bdf8] border-[3px] border-white flex items-center justify-center shadow-[0_0_15px_#38bdf8] z-20">
+                    <span className="text-white text-base font-bold">2</span>
+                  </div>
+                  {/* Orbe en attente */}
+                  <div className="relative">
+                    <div className="absolute w-8 h-1 bg-[rgba(255,255,255,0.2)] -left-6 top-1/2 -translate-y-1/2 border-y border-dashed border-transparent" style={{ borderTopColor: 'rgba(255,255,255,0.2)' }} />
+                    <div className="w-[36px] h-[36px] rounded-full bg-[rgba(30,41,59,0.9)] border-2 border-[#64748b] flex items-center justify-center shadow-lg z-10 relative">
+                      <span className="text-white text-[13px] font-bold">3</span>
+                    </div>
+                  </div>
                 </div>
                 <h2 className="text-xl font-black text-white uppercase tracking-wide">
                   Chasse aux orbes
                 </h2>
                 <p className="text-xs text-slate-300 font-medium leading-relaxed">
-                  Relie un maximum d'<span className="text-emerald-400 font-bold">orbes de couleur</span><br />
+                  Relie un maximum d'<span className="text-[#38bdf8] font-bold">orbes de couleur</span><br />
                   dans l'ordre indiqué<br />
                   avant la fin du temps imparti.
                 </p>
@@ -727,9 +763,15 @@ export default function HandTracker() {
             {tutoStep === 4 && (
               <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-300">
                 <div className="relative w-20 h-20 mx-auto flex items-center justify-center">
-                  <div className="w-12 h-12 rounded-full bg-slate-950 border-2 border-red-500 flex items-center justify-center shadow-[0_0_20px_rgba(239,68,68,0.5)] animate-pulse">
-                    <div className="w-2.5 h-2.5 rounded-full bg-red-400" />
-                  </div>
+                  <svg width="60" height="60" viewBox="-30 -30 60 60" className="drop-shadow-[0_0_15px_rgba(239,68,68,0.5)] animate-pulse">
+                    <g fill="#ef4444">
+                      {Array.from({ length: 8 }).map((_, i) => (
+                        <polygon key={i} points="0,-28 -5,-18 5,-18" transform={`rotate(${(i * 360) / 8})`} />
+                      ))}
+                    </g>
+                    <circle cx="0" cy="0" r="20" fill="#09090b" stroke="#ef4444" strokeWidth="3" />
+                    <circle cx="0" cy="0" r="5" fill="#f87171" />
+                  </svg>
                 </div>
                 <h2 className="text-xl font-black text-red-500 uppercase tracking-wide">
                   Attention aux Pièges !
@@ -812,79 +854,48 @@ export default function HandTracker() {
               })}
             </div>
           </div>
-
-          {gameState === 'playing' && (
-            <div className="bg-black/60 border border-white/10 backdrop-blur-md px-4 py-1 rounded-full text-center">
-              <p className="text-xs font-bold text-slate-200">
-                {levelInfo.numPoints} orbes • <span className="text-amber-400">+5s / 3 formes</span>
-                {!levelInfo.showGuide && <span className="text-red-400 ml-1.5">(Guide désactivé)</span>}
-              </p>
-            </div>
-          )}
         </div>
       )}
 
-      {/* LOADER */}
-      {gameState === 'loading' && (
-        <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center p-6 text-center z-50 space-y-4">
-          <div className="w-12 h-12 border-4 border-amber-400 border-t-transparent rounded-full animate-spin" />
-          <p className="text-xs font-black text-amber-300 tracking-widest uppercase">INITIALISATION DE LA PLUME...</p>
-        </div>
-      )}
-
-      {/* FIN DE PARTIE */}
+      {/* ÉCRAN GAME OVER */}
       {gameState === 'gameover' && (
-        <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-xl flex flex-col justify-between p-6 z-50 text-center animate-in fade-in duration-300">
-          <div className="pt-8 space-y-2">
-            <span className={`text-[10px] font-black uppercase tracking-[0.2em] px-3 py-1 rounded-full border ${
-              gameOverReason === 'mine'
-                ? 'bg-red-500/10 text-red-400 border-red-500/20'
-                : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-            }`}>
-              {gameOverReason === 'mine' ? 'BOOM ! EXPLOSION' : 'ÉPUISEMENT DU TEMPS'}
-            </span>
-            <h2 className="text-4xl font-black text-white uppercase tracking-tight">
+        <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-xl flex flex-col items-center justify-center p-6 z-40 text-center animate-in fade-in duration-300">
+          <div className="space-y-4 mb-8">
+            <h2 className="text-6xl font-black text-transparent bg-clip-text bg-gradient-to-b from-white to-slate-500 uppercase tracking-tight">
               GAME OVER
             </h2>
+            <p className="text-sm font-semibold text-slate-400 max-w-xs mx-auto italic px-4">
+              "{endQuote}"
+            </p>
           </div>
 
-          <div className="my-auto space-y-6 max-w-xs mx-auto w-full">
-            <div className="bg-slate-900/90 border border-white/10 rounded-2xl p-5 shadow-2xl relative overflow-hidden">
-              <p className="text-xs text-slate-400 font-bold uppercase tracking-wider mb-1">Score Final</p>
-              <p className="text-5xl font-black text-amber-400 drop-shadow-[0_0_15px_rgba(251,191,36,0.3)]">
-                {score} <span className="text-base text-slate-500">PTS</span>
-              </p>
-
-              {score >= highScore && score > 0 && (
-                <span className="inline-block mt-3 text-[10px] font-black text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-0.5 rounded-full uppercase tracking-widest">
-                  Nouveau Record !
-                </span>
-              )}
+          <div className="bg-slate-900/50 border border-white/10 rounded-3xl p-8 mb-10 w-full max-w-xs space-y-6 shadow-2xl">
+            <div>
+              <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Score Final</p>
+              <p className="text-5xl font-black text-white">{score} <span className="text-lg text-slate-500">PTS</span></p>
             </div>
 
-            {endQuote && (
-              <div className="bg-slate-900/50 border border-amber-500/20 rounded-2xl p-4 shadow-lg">
-                <p className="text-xs font-bold text-amber-200/90 italic leading-relaxed">
-                  "{endQuote}"
-                </p>
-              </div>
-            )}
+            <div className="h-px w-full bg-white/10" />
+
+            <div>
+              <p className="text-[10px] font-black text-amber-500/50 uppercase tracking-widest mb-1">Meilleur Score</p>
+              <p className="text-2xl font-black text-amber-400">{highScore} <span className="text-xs text-amber-500/50">PTS</span></p>
+            </div>
           </div>
 
-          <div className="pb-6 max-w-xs mx-auto w-full space-y-3">
+          <div className="space-y-3 w-full max-w-xs">
             <button
-              onClick={() => {
-                requestFullscreenMode();
-                startGame();
-              }}
+              onClick={() => startGame()}
               className="w-full py-4 bg-gradient-to-r from-amber-500 via-orange-500 to-red-500 text-slate-950 font-black rounded-2xl shadow-xl shadow-orange-500/25 active:scale-95 transition-transform flex items-center justify-center gap-2 text-lg uppercase tracking-wider"
             >
-              <RotateCcw className="w-5 h-5" /> REJOUER
+              <RotateCcw className="w-5 h-5 stroke-[2.5]" /> REJOUER
             </button>
-
             <button
-              onClick={() => setCurrentScreen('home')}
-              className="w-full py-3 bg-slate-900 hover:bg-slate-800 text-slate-400 font-bold rounded-2xl border border-white/10 active:scale-95 transition-transform text-xs uppercase tracking-wider"
+              onClick={() => {
+                setCurrentScreen('home');
+                setGameStateSync('idle');
+              }}
+              className="w-full py-3 bg-transparent text-slate-400 font-bold rounded-2xl active:scale-95 transition-transform text-sm uppercase tracking-wide hover:text-white"
             >
               Menu Principal
             </button>
