@@ -537,3 +537,5 @@ export const HandTracker: React.FC = () => {
     </div>
   );
 };
+
+export default HandTracker;
